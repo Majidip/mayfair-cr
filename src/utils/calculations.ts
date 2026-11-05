@@ -2,6 +2,7 @@ export interface Bill {
   id: string;
   amount: number;
   bill_date: string;
+  due_date?: string;
   shop_id: string;
   booker_id: string;
   business_id?: string;
@@ -14,8 +15,8 @@ export interface Payment {
   bill_id: string;
   amount: number;
   payment_date: string;
-  payment_mode?: string;
-  notes?: string;
+  mode?: string;
+  ref?: string;
   createdAt?: string;
 }
 
@@ -23,6 +24,7 @@ export interface Shop {
   id: string;
   name: string;
   booker_id: string;
+  business_id?: string;
   contact?: string;
   phone?: string;
   address?: string;
@@ -34,7 +36,7 @@ export interface Booker {
   id: string;
   name: string;
   business_id: string;
-  business_name?: string;
+  contact?: string;
   phone?: string;
 }
 
@@ -60,10 +62,7 @@ export const computeBillState = (bill: Bill, payments: Payment[] = []) => {
 };
 
 export const formatCurrency = (amount: number) => {
-  return '₨ ' + Number(amount || 0).toLocaleString(undefined, {
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 0
-  });
+  return '₨ ' + Math.round(Number(amount || 0)).toLocaleString();
 };
 
 export const getDaysOverdue = (billDate: string) => {

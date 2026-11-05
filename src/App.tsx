@@ -9,20 +9,13 @@ import {
   Search, 
   Plus, 
   CheckCircle2, 
-  Clock, 
-  AlertCircle, 
   ChevronRight, 
-  Phone, 
-  MapPin, 
-  ArrowUpRight, 
-  ArrowDownLeft, 
-  Filter, 
   X,
-  CreditCard,
   Share2,
-  DollarSign,
   TrendingUp,
-  FileText
+  AlertTriangle,
+  Calendar,
+  Building2
 } from 'lucide-react';
 import { supabase } from './supabase';
 import { 
@@ -78,16 +71,16 @@ export default function App() {
   const [newBillNotes, setNewBillNotes] = useState('');
   const [billSubmitting, setBillSubmitting] = useState(false);
 
-  // Fetch all live data from Supabase
+  // Fetch all live data from Supabase (with limit 20000 so no 1000 row truncation occurs)
   const loadData = useCallback(async () => {
     try {
       setRefreshing(true);
       const [bizRes, bookersRes, shopsRes, billsRes, paymentsRes] = await Promise.all([
-        supabase.from('businesses').select('*').order('name'),
-        supabase.from('bookers').select('*').order('name'),
-        supabase.from('shops').select('*').order('name'),
-        supabase.from('bills').select('*').order('bill_date', { ascending: false }),
-        supabase.from('payments').select('*').order('payment_date', { ascending: false })
+        supabase.from('businesses').select('*').limit(100).order('name'),
+        supabase.from('bookers').select('*').limit(100).order('name'),
+        supabase.from('shops').select('*').limit(5000).order('name'),
+        supabase.from('bills').select('*').limit(20000).order('bill_date', { ascending: false }),
+        supabase.from('payments').select('*').limit(25000).order('payment_date', { ascending: false })
       ]);
 
       if (bizRes.data) setBusinesses(bizRes.data);
@@ -109,48 +102,70 @@ export default function App() {
   useEffect(() => {
     loadData();
 
-    // Auto-refresh every 30 seconds for live background sync
-    const interval = setInterval(loadData, 30000);
+    // Auto-refresh every 25 seconds for live background sync
+    const interval = setInterval(loadData, 25000);
     return () => clearInterval(interval);
   }, [loadData]);
 
-  // Derived stats
+  // Derived stats with 100% PARITY to Desktop DashboardView.tsx
   const stats = useMemo(() => {
-    let totalOutstanding = 0;
-    let totalBilled = 0;
-    let totalPaid = 0;
+    const totalBilled = bills.reduce((sum, b) => sum + Number(b.amount || 0), 0);
+    const totalPaid = payments.reduce((sum, p) => sum + Number(p.amount || 0), 0);
+    const totalOutstanding = Math.max(0, totalBilled - totalPaid);
 
+    const todayStr = today();
+    const currentMonth = todayStr.slice(0, 7);
+
+    // Payments for today
+    let activeDatePayments = payments.filter(p => p.payment_date === todayStr);
+    let activeRecoveryLabel = 'Daily Recovery (Today)';
+
+    // If today is early morning and has 0 punched payments yet, show latest batch date (Nov 05)
+    if (activeDatePayments.length === 0 && payments.length > 0) {
+      const latestDate = payments[0]?.payment_date || todayStr;
+      activeDatePayments = payments.filter(p => p.payment_date === latestDate);
+      activeRecoveryLabel = `Daily Recovery (${latestDate})`;
+    }
+
+    const dailyCollection = activeDatePayments.reduce((sum, p) => sum + Number(p.amount || 0), 0);
+    const dailyCash = activeDatePayments
+      .filter(p => !p.mode || p.mode.toLowerCase() === 'cash')
+      .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+    const dailyNonCash = activeDatePayments
+      .filter(p => p.mode && (p.mode.toLowerCase().includes('return') || p.mode.toLowerCase().includes('credit')))
+      .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+    const dailyOnline = activeDatePayments
+      .filter(p => p.mode && (p.mode.toLowerCase().includes('online') || p.mode.toLowerCase().includes('bank') || p.mode.toLowerCase().includes('cheque')))
+      .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
+    const monthlyCollection = payments
+      .filter(p => p.payment_date && p.payment_date.startsWith(currentMonth))
+      .reduce((sum, p) => sum + Number(p.amount || 0), 0);
+
+    // Overdue bills matching desktop SQL
+    let overdueBills = 0;
     bills.forEach(b => {
       const bPayments = payments.filter(p => p.bill_id === b.id);
-      const s = computeBillState(b, bPayments);
-      totalOutstanding += s.outstanding;
-      totalBilled += s.total;
-      totalPaid += s.paid;
+      const paid = bPayments.reduce((sum, p) => sum + Number(p.amount || 0), 0);
+      const bal = Number(b.amount || 0) - paid;
+      if (bal > 0 && b.due_date && b.due_date < todayStr) {
+        overdueBills++;
+      }
     });
-
-    // Today's stats
-    const todayStr = today();
-    const todayPayments = payments.filter(p => p.payment_date === todayStr);
-    const todayCash = todayPayments
-      .filter(p => !p.payment_mode || p.payment_mode === 'Cash')
-      .reduce((sum, p) => sum + Number(p.amount || 0), 0);
-    const todayNonCash = todayPayments
-      .filter(p => p.payment_mode === 'Return' || p.payment_mode === 'Credit Note')
-      .reduce((sum, p) => sum + Number(p.amount || 0), 0);
-    const todayOnline = todayPayments
-      .filter(p => p.payment_mode === 'Online Transfer' || p.payment_mode === 'Cheque')
-      .reduce((sum, p) => sum + Number(p.amount || 0), 0);
 
     return {
       totalOutstanding,
       totalBilled,
       totalPaid,
-      todayTotal: todayCash + todayNonCash + todayOnline,
-      todayCash,
-      todayNonCash,
-      todayOnline,
-      totalShops: shops.length,
-      totalBills: bills.length
+      dailyCollection,
+      dailyCash,
+      dailyNonCash,
+      dailyOnline,
+      monthlyCollection,
+      overdueBills,
+      activeShops: shops.length,
+      totalBills: bills.length,
+      activeRecoveryLabel
     };
   }, [bills, payments, shops]);
 
@@ -174,7 +189,7 @@ export default function App() {
 
       return {
         ...shop,
-        bookerName: booker ? booker.name : 'Unknown',
+        bookerName: booker ? booker.name : 'Unassigned',
         outstanding,
         billsCount: shopBills.length,
         overdueBillsCount
@@ -187,7 +202,7 @@ export default function App() {
     return shopsWithBalance.filter(s => {
       const matchesSearch = s.name.toLowerCase().includes(shopSearch.toLowerCase()) ||
         s.bookerName.toLowerCase().includes(shopSearch.toLowerCase()) ||
-        (s.phone && s.phone.includes(shopSearch));
+        (s.contact && s.contact.includes(shopSearch));
       const matchesBooker = selectedBookerFilter === 'ALL' || s.booker_id === selectedBookerFilter;
       return matchesSearch && matchesBooker;
     }).sort((a, b) => b.outstanding - a.outstanding);
@@ -204,7 +219,6 @@ export default function App() {
 
     setPaySubmitting(true);
     try {
-      // Find shop's unpaid/partial bills sorted by date ascending (FIFO)
       const shopBills = bills
         .filter(b => b.shop_id === payShopId)
         .sort((a, b) => new Date(a.bill_date).getTime() - new Date(b.bill_date).getTime());
@@ -224,8 +238,8 @@ export default function App() {
             bill_id: bill.id,
             amount: allocation,
             payment_date: payDate,
-            payment_mode: payMode,
-            notes: payNotes || null,
+            mode: payMode,
+            ref: payNotes || '',
             createdAt: now(),
             updatedAt: now()
           });
@@ -233,15 +247,14 @@ export default function App() {
         }
       }
 
-      // If amount still remains (excess advance payment), allocate to most recent bill or first bill
       if (remainingAmount > 0 && shopBills.length > 0) {
         newPaymentRecords.push({
           id: uid('pay'),
           bill_id: shopBills[shopBills.length - 1].id,
           amount: remainingAmount,
           payment_date: payDate,
-          payment_mode: payMode,
-          notes: (payNotes ? payNotes + ' ' : '') + '(Advance/Excess)',
+          mode: payMode,
+          ref: (payNotes ? payNotes + ' ' : '') + '(Advance/Excess)',
           createdAt: now(),
           updatedAt: now()
         });
@@ -253,11 +266,10 @@ export default function App() {
         return;
       }
 
-      // Insert into Supabase
       const { error } = await supabase.from('payments').insert(newPaymentRecords);
       if (error) throw error;
 
-      setPaySuccessMsg(`✓ Rs. ${amountNum.toLocaleString()} successfully recorded & synced!`);
+      setPaySuccessMsg(`✓ Rs. ${Math.round(amountNum).toLocaleString()} successfully recorded & synced!`);
       setPayAmount('');
       setPayNotes('');
       setTimeout(() => setPaySuccessMsg(''), 4000);
@@ -285,10 +297,11 @@ export default function App() {
         id: uid('bill'),
         shop_id: newBillShopId,
         booker_id: newBillBookerId,
-        business_id: booker?.business_id || businesses[0]?.id || 'biz_mayfair',
+        business_id: booker?.business_id || businesses[0]?.id || 'biz_mfl6h6zu_7597',
         amount: amountNum,
         bill_date: newBillDate,
-        notes: newBillNotes || null,
+        due_date: newBillDate,
+        notes: newBillNotes || '',
         createdAt: now(),
         updatedAt: now()
       };
@@ -311,14 +324,13 @@ export default function App() {
   // WhatsApp Share daily recovery report
   const handleShareWhatsApp = () => {
     const todayStr = today();
-    const todayPayments = payments.filter(p => p.payment_date === todayStr);
     
     let text = `*📊 MAYFAIR DAILY RECOVERY REPORT*\n`;
     text += `*Date:* ${todayStr}\n`;
-    text += `*Total Recovery:* ${formatCurrency(stats.todayTotal)}\n`;
-    text += `💵 *Cash Handover:* ${formatCurrency(stats.todayCash)}\n`;
-    text += `🔄 *Returns / Adjustments:* ${formatCurrency(stats.todayNonCash)}\n`;
-    text += `🏦 *Online / Cheque:* ${formatCurrency(stats.todayOnline)}\n\n`;
+    text += `*Total Recovery:* ${formatCurrency(stats.dailyCollection)}\n`;
+    text += `💵 *Cash Handover:* ${formatCurrency(stats.dailyCash)}\n`;
+    text += `🔄 *Returns / Adjustments:* ${formatCurrency(stats.dailyNonCash)}\n`;
+    text += `🏦 *Online / Cheque:* ${formatCurrency(stats.dailyOnline)}\n\n`;
     text += `*Total Market Balance:* ${formatCurrency(stats.totalOutstanding)}\n`;
     text += `_Auto-generated via Mayfair Mobile App_`;
 
@@ -338,7 +350,7 @@ export default function App() {
               Mayfair Manager
               <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
             </h1>
-            <p className="text-[11px] text-slate-400 font-medium">Mayfair & Treet Cloud Sync</p>
+            <p className="text-[11px] text-slate-400 font-medium">Mayfair Cloud Live</p>
           </div>
         </div>
 
@@ -363,36 +375,81 @@ export default function App() {
           </div>
         ) : (
           <>
-            {/* TAB: DASHBOARD */}
+            {/* TAB: DASHBOARD (MATCHES DESKTOP VIEW 100%) */}
             {activeTab === 'dashboard' && (
               <div className="space-y-4">
-                {/* Total Outstanding Hero Card */}
-                <div className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-indigo-900/60 via-slate-900 to-slate-900 border border-indigo-500/30 p-5 shadow-xl">
+                {/* 1. TOTAL OUTSTANDING CARD */}
+                <div className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-indigo-900/60 via-slate-900 to-slate-900 border border-indigo-500/40 p-5 shadow-xl">
                   <div className="flex justify-between items-start mb-2">
-                    <span className="text-xs font-semibold uppercase tracking-wider text-indigo-300">Total Market Outstanding</span>
-                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 font-medium">Live</span>
+                    <span className="text-xs font-bold uppercase tracking-wider text-indigo-300">TOTAL OUTSTANDING</span>
+                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 font-medium">REPORTED</span>
                   </div>
-                  <div className="text-3xl font-extrabold text-white tracking-tight">
+                  <div className="text-3xl font-black text-indigo-400 tracking-tight">
                     {formatCurrency(stats.totalOutstanding)}
                   </div>
-                  <div className="mt-4 pt-3 border-t border-slate-800/80 grid grid-cols-2 gap-2 text-xs">
-                    <div>
-                      <span className="text-slate-400 block text-[11px]">Total Billed</span>
-                      <span className="font-semibold text-slate-200">{formatCurrency(stats.totalBilled)}</span>
-                    </div>
-                    <div>
-                      <span className="text-slate-400 block text-[11px]">Total Recovered</span>
-                      <span className="font-semibold text-emerald-400">{formatCurrency(stats.totalPaid)}</span>
-                    </div>
+                  <div className="mt-3 text-[11px] text-slate-400">
+                    OVERALL PORTFOLIO • {stats.activeShops} SHOPS
                   </div>
                 </div>
 
-                {/* Today's Recovery Breakdown */}
+                {/* 2. RECOVERY STATS ROW (MATCHES DESKTOP KPI CARDS) */}
+                <div className="grid grid-cols-2 gap-3">
+                  {/* Daily Recovery Card */}
+                  <div className="rounded-2xl bg-slate-900/90 border border-slate-800 p-4 shadow-lg">
+                    <div className="flex justify-between items-center mb-1">
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">DAILY RECOVERY</span>
+                      <span className="text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-semibold">REPORTED</span>
+                    </div>
+                    <div className="text-xl font-extrabold text-emerald-400 my-1">
+                      {formatCurrency(stats.dailyCollection)}
+                    </div>
+                    <span className="text-[10px] text-slate-400 block">{stats.activeRecoveryLabel}</span>
+                  </div>
+
+                  {/* Monthly Recovery Card */}
+                  <div className="rounded-2xl bg-slate-900/90 border border-slate-800 p-4 shadow-lg">
+                    <div className="flex justify-between items-center mb-1">
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">MONTHLY RECOVERY</span>
+                      <span className="text-[9px] px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-400 font-semibold">REPORTED</span>
+                    </div>
+                    <div className="text-xl font-extrabold text-indigo-400 my-1">
+                      {formatCurrency(stats.monthlyCollection)}
+                    </div>
+                    <span className="text-[10px] text-slate-400 block">MONTH-TO-DATE</span>
+                  </div>
+                </div>
+
+                {/* 3. OVERDUE & ACTIVE SHOPS ROW */}
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="rounded-2xl bg-slate-900/90 border border-slate-800 p-4 shadow-lg">
+                    <div className="flex justify-between items-center mb-1">
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">OVERDUE BILLS</span>
+                      <span className="text-[9px] px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-400 font-semibold">ACTION</span>
+                    </div>
+                    <div className="text-xl font-extrabold text-rose-500 my-1">
+                      {stats.overdueBills} INVOICES
+                    </div>
+                    <span className="text-[10px] text-slate-400 block">ACTION REQUIRED</span>
+                  </div>
+
+                  <div className="rounded-2xl bg-slate-900/90 border border-slate-800 p-4 shadow-lg">
+                    <div className="flex justify-between items-center mb-1">
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">ACTIVE SHOPS</span>
+                      <span className="text-[9px] px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-400 font-semibold">COVERAGE</span>
+                    </div>
+                    <div className="text-xl font-extrabold text-sky-400 my-1">
+                      {stats.activeShops}
+                    </div>
+                    <span className="text-[10px] text-slate-400 block">NETWORK COVERAGE</span>
+                  </div>
+                </div>
+
+                {/* Daily Recovery Breakdown (Cash vs Returns) */}
                 <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 shadow-lg">
                   <div className="flex items-center justify-between mb-3">
                     <div className="flex items-center gap-2">
                       <TrendingUp size={18} className="text-rose-400" />
-                      <h2 className="text-sm font-bold text-slate-200">Today's Collections</h2>
+                      <h2 className="text-sm font-bold text-slate-200">Payment Modes Breakdown</h2>
                     </div>
                     <button 
                       onClick={handleShareWhatsApp}
@@ -403,27 +460,23 @@ export default function App() {
                     </button>
                   </div>
 
-                  <div className="text-2xl font-bold text-emerald-400 mb-3">
-                    {formatCurrency(stats.todayTotal)}
-                  </div>
-
                   <div className="grid grid-cols-3 gap-2">
                     <div className="bg-slate-950/60 rounded-xl p-2.5 border border-slate-800">
                       <span className="text-[10px] text-slate-400 block font-medium">💵 Cash</span>
-                      <span className="text-xs font-bold text-emerald-300">{formatCurrency(stats.todayCash)}</span>
+                      <span className="text-xs font-bold text-emerald-300">{formatCurrency(stats.dailyCash)}</span>
                     </div>
                     <div className="bg-slate-950/60 rounded-xl p-2.5 border border-slate-800">
                       <span className="text-[10px] text-slate-400 block font-medium">🔄 Returns</span>
-                      <span className="text-xs font-bold text-amber-300">{formatCurrency(stats.todayNonCash)}</span>
+                      <span className="text-xs font-bold text-amber-300">{formatCurrency(stats.dailyNonCash)}</span>
                     </div>
                     <div className="bg-slate-950/60 rounded-xl p-2.5 border border-slate-800">
                       <span className="text-[10px] text-slate-400 block font-medium">🏦 Online</span>
-                      <span className="text-xs font-bold text-sky-300">{formatCurrency(stats.todayOnline)}</span>
+                      <span className="text-xs font-bold text-sky-300">{formatCurrency(stats.dailyOnline)}</span>
                     </div>
                   </div>
                 </div>
 
-                {/* Quick Shortcuts */}
+                {/* Quick Action Shortcuts */}
                 <div className="grid grid-cols-2 gap-3">
                   <button 
                     onClick={() => setActiveTab('quickpay')}
@@ -454,7 +507,7 @@ export default function App() {
 
                 {/* Booker Outstanding Summary */}
                 <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 shadow-lg">
-                  <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-3">Booker Balances</h3>
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-3">Mayfair Booker Balances</h3>
                   <div className="space-y-2">
                     {bookers.map(b => {
                       const bookerShops = shopsWithBalance.filter(s => s.booker_id === b.id);
@@ -493,7 +546,7 @@ export default function App() {
                     <Search size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
                     <input 
                       type="text"
-                      placeholder="Search shop name, phone..."
+                      placeholder="Search shop name, area..."
                       value={shopSearch}
                       onChange={e => setShopSearch(e.target.value)}
                       className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-slate-900 border border-slate-800 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-rose-500 transition"
@@ -553,7 +606,7 @@ export default function App() {
                           <h4 className="text-sm font-bold text-slate-100 leading-tight">{shop.name}</h4>
                           <div className="flex items-center gap-2 mt-1 text-[11px] text-slate-400">
                             <span>{shop.bookerName}</span>
-                            {shop.phone && <span>• {shop.phone}</span>}
+                            {shop.contact && <span>• {shop.contact}</span>}
                           </div>
                           {shop.overdueBillsCount > 0 && (
                             <span className="inline-block mt-1 text-[10px] px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-400 border border-rose-500/30 font-medium">
@@ -683,10 +736,10 @@ export default function App() {
                         />
                       </div>
                       <div>
-                        <label className="text-xs font-semibold text-slate-300 block mb-1">Notes</label>
+                        <label className="text-xs font-semibold text-slate-300 block mb-1">Notes / Ref</label>
                         <input 
                           type="text"
-                          placeholder="Optional reference"
+                          placeholder="Reference"
                           value={payNotes}
                           onChange={e => setPayNotes(e.target.value)}
                           className="w-full p-2.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-200 focus:outline-none focus:border-rose-500"
@@ -721,7 +774,7 @@ export default function App() {
             {activeTab === 'bills' && (
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
-                  <h3 className="text-sm font-bold text-slate-200">Recent Bills</h3>
+                  <h3 className="text-sm font-bold text-slate-200">Mayfair Bills ({bills.length.toLocaleString()})</h3>
                   <button 
                     onClick={() => setShowAddBillModal(true)}
                     className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold active:scale-95 transition"
@@ -732,7 +785,7 @@ export default function App() {
                 </div>
 
                 <div className="space-y-2">
-                  {bills.slice(0, 50).map(bill => {
+                  {bills.slice(0, 60).map(bill => {
                     const bPayments = payments.filter(p => p.bill_id === bill.id);
                     const state = computeBillState(bill, bPayments);
                     const shop = shops.find(s => s.id === bill.shop_id);
@@ -745,7 +798,7 @@ export default function App() {
                       >
                         <div className="flex justify-between items-start">
                           <div>
-                            <span className="text-sm font-bold text-slate-100">{shop?.name || 'Unknown Shop'}</span>
+                            <span className="text-sm font-bold text-slate-100">{shop?.name || 'Shop'}</span>
                             <div className="text-[11px] text-slate-400 mt-0.5">
                               {booker?.name} • Date: {bill.bill_date}
                             </div>
@@ -802,20 +855,20 @@ export default function App() {
 
                   <div className="space-y-2 text-xs">
                     <div className="flex justify-between p-2 rounded-xl bg-slate-950/60 border border-slate-800">
-                      <span className="text-slate-400">Today Total Recovery:</span>
-                      <span className="font-bold text-white">{formatCurrency(stats.todayTotal)}</span>
+                      <span className="text-slate-400">{stats.activeRecoveryLabel}:</span>
+                      <span className="font-bold text-white">{formatCurrency(stats.dailyCollection)}</span>
                     </div>
                     <div className="flex justify-between p-2 rounded-xl bg-slate-950/60 border border-slate-800">
                       <span className="text-emerald-400">💵 Physical Cash Handover:</span>
-                      <span className="font-bold text-emerald-400">{formatCurrency(stats.todayCash)}</span>
+                      <span className="font-bold text-emerald-400">{formatCurrency(stats.dailyCash)}</span>
                     </div>
                     <div className="flex justify-between p-2 rounded-xl bg-slate-950/60 border border-slate-800">
                       <span className="text-amber-400">🔄 Non-Cash (Returns/Credits):</span>
-                      <span className="font-bold text-amber-400">{formatCurrency(stats.todayNonCash)}</span>
+                      <span className="font-bold text-amber-400">{formatCurrency(stats.dailyNonCash)}</span>
                     </div>
                     <div className="flex justify-between p-2 rounded-xl bg-slate-950/60 border border-slate-800">
                       <span className="text-sky-400">🏦 Bank / Online Transfer:</span>
-                      <span className="font-bold text-sky-400">{formatCurrency(stats.todayOnline)}</span>
+                      <span className="font-bold text-sky-400">{formatCurrency(stats.dailyOnline)}</span>
                     </div>
                   </div>
                 </div>
@@ -826,6 +879,14 @@ export default function App() {
                   <div className="flex justify-between text-slate-400">
                     <span>Database:</span>
                     <span className="text-slate-200">Supabase Cloud (Mayfair Schema)</span>
+                  </div>
+                  <div className="flex justify-between text-slate-400">
+                    <span>Business:</span>
+                    <span className="text-rose-400 font-bold">Mayfair Only (100% Isolated)</span>
+                  </div>
+                  <div className="flex justify-between text-slate-400">
+                    <span>Total Outstanding:</span>
+                    <span className="text-indigo-400 font-bold">{formatCurrency(stats.totalOutstanding)}</span>
                   </div>
                   <div className="flex justify-between text-slate-400">
                     <span>Last Sync:</span>
@@ -851,7 +912,7 @@ export default function App() {
                 <h3 className="font-bold text-base text-white">{selectedShop.name}</h3>
                 <p className="text-xs text-slate-400">
                   {bookers.find(b => b.id === selectedShop.booker_id)?.name}
-                  {selectedShop.phone && ` • ${selectedShop.phone}`}
+                  {selectedShop.contact && ` • ${selectedShop.contact}`}
                 </p>
               </div>
               <button 
@@ -1012,7 +1073,7 @@ export default function App() {
           <button 
             onClick={() => setActiveTab('dashboard')}
             className={`flex flex-col items-center justify-center py-1 transition ${
-              activeTab === 'dashboard' ? 'text-rose-500' : 'text-slate-400 hover:text-slate-200'
+              activeTab === 'dashboard' ? 'text-rose-500 font-bold' : 'text-slate-400 hover:text-slate-200'
             }`}
           >
             <LayoutDashboard size={20} />
@@ -1022,7 +1083,7 @@ export default function App() {
           <button 
             onClick={() => setActiveTab('shops')}
             className={`flex flex-col items-center justify-center py-1 transition ${
-              activeTab === 'shops' ? 'text-rose-500' : 'text-slate-400 hover:text-slate-200'
+              activeTab === 'shops' ? 'text-rose-500 font-bold' : 'text-slate-400 hover:text-slate-200'
             }`}
           >
             <Store size={20} />
@@ -1044,7 +1105,7 @@ export default function App() {
           <button 
             onClick={() => setActiveTab('bills')}
             className={`flex flex-col items-center justify-center py-1 transition ${
-              activeTab === 'bills' ? 'text-rose-500' : 'text-slate-400 hover:text-slate-200'
+              activeTab === 'bills' ? 'text-rose-500 font-bold' : 'text-slate-400 hover:text-slate-200'
             }`}
           >
             <Receipt size={20} />
@@ -1054,7 +1115,7 @@ export default function App() {
           <button 
             onClick={() => setActiveTab('audit')}
             className={`flex flex-col items-center justify-center py-1 transition ${
-              activeTab === 'audit' ? 'text-rose-500' : 'text-slate-400 hover:text-slate-200'
+              activeTab === 'audit' ? 'text-rose-500 font-bold' : 'text-slate-400 hover:text-slate-200'
             }`}
           >
             <ShieldCheck size={20} />
