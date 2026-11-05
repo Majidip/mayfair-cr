@@ -20,7 +20,11 @@ import {
   Save,
   ArrowRight,
   Filter,
-  DollarSign
+  DollarSign,
+  ChevronDown,
+  Phone,
+  Clock,
+  Layers
 } from 'lucide-react';
 import { supabase } from './supabase';
 import { 
@@ -53,9 +57,10 @@ export default function App() {
   // Selected Shop Modal for detailed ledger
   const [selectedShop, setSelectedShop] = useState<(Shop & { outstanding?: number; bookerName?: string }) | null>(null);
 
-  // Search and Filters
+  // Search and Filters for Shops tab
   const [shopSearch, setShopSearch] = useState('');
   const [selectedBookerFilter, setSelectedBookerFilter] = useState('ALL');
+  const [shopDisplayLimit, setShopDisplayLimit] = useState(40);
 
   // ==================== BATCH QUICK PAY STATE ====================
   const [payBookerId, setPayBookerId] = useState('');
@@ -64,8 +69,12 @@ export default function App() {
   const [payNotes, setPayNotes] = useState('');
   const [paySearch, setPaySearch] = useState('');
   const [payOnlyDue, setPayOnlyDue] = useState(true);
+  
   // Map of shopId -> payment amount string
   const [payAmounts, setPayAmounts] = useState<{ [shopId: string]: string }>({});
+  // Map of shopId -> selected specific billId (or 'FIFO')
+  const [paySelectedBills, setPaySelectedBills] = useState<{ [shopId: string]: string }>({});
+  
   const [paySubmitting, setPaySubmitting] = useState(false);
   const [paySuccessMsg, setPaySuccessMsg] = useState('');
 
@@ -94,7 +103,6 @@ export default function App() {
       if (bizRes.data) setBusinesses(bizRes.data);
       if (bookersRes.data) {
         setBookers(bookersRes.data);
-        // Default select first booker if none selected
         if (!payBookerId && bookersRes.data.length > 0) {
           setPayBookerId(bookersRes.data[0].id);
         }
@@ -181,24 +189,29 @@ export default function App() {
     };
   }, [bills, payments, shops]);
 
+  // Pre-indexed payments map by billId
+  const billPaymentsMap = useMemo(() => {
+    const map = new Map<string, Payment[]>();
+    payments.forEach(p => {
+      if (!map.has(p.bill_id)) map.set(p.bill_id, []);
+      map.get(p.bill_id)!.push(p);
+    });
+    return map;
+  }, [payments]);
+
+  // Pre-indexed bills map by shopId
+  const shopBillsMap = useMemo(() => {
+    const map = new Map<string, Bill[]>();
+    bills.forEach(b => {
+      if (!map.has(b.shop_id)) map.set(b.shop_id, []);
+      map.get(b.shop_id)!.push(b);
+    });
+    return map;
+  }, [bills]);
+
   // Shop balances map for quick calculations
   const shopBalances = useMemo(() => {
     const map = new Map<string, { outstanding: number; overdueCount: number; billCount: number }>();
-    
-    // Group bills by shop
-    const shopBillsMap = new Map<string, Bill[]>();
-    bills.forEach(b => {
-      if (!shopBillsMap.has(b.shop_id)) shopBillsMap.set(b.shop_id, []);
-      shopBillsMap.get(b.shop_id)!.push(b);
-    });
-
-    // Group payments by bill
-    const billPaymentsMap = new Map<string, Payment[]>();
-    payments.forEach(p => {
-      if (!billPaymentsMap.has(p.bill_id)) billPaymentsMap.set(p.bill_id, []);
-      billPaymentsMap.get(p.bill_id)!.push(p);
-    });
-
     const todayStr = today();
 
     shops.forEach(shop => {
@@ -219,7 +232,7 @@ export default function App() {
     });
 
     return map;
-  }, [shops, bills, payments]);
+  }, [shops, shopBillsMap, billPaymentsMap]);
 
   // Shops with enriched balance data
   const shopsWithBalance = useMemo(() => {
@@ -239,20 +252,26 @@ export default function App() {
   // Filtered shops for General Shops tab
   const filteredShops = useMemo(() => {
     return shopsWithBalance.filter(s => {
-      const matchesSearch = s.name.toLowerCase().includes(shopSearch.toLowerCase()) ||
-        s.bookerName.toLowerCase().includes(shopSearch.toLowerCase()) ||
-        (s.contact && s.contact.includes(shopSearch));
+      const query = shopSearch.trim().toLowerCase();
+      const matchesSearch = !query || 
+        s.name.toLowerCase().includes(query) ||
+        s.bookerName.toLowerCase().includes(query) ||
+        (s.contact && s.contact.toLowerCase().includes(query)) ||
+        (s.address && s.address.toLowerCase().includes(query));
       const matchesBooker = selectedBookerFilter === 'ALL' || s.booker_id === selectedBookerFilter;
       return matchesSearch && matchesBooker;
     }).sort((a, b) => b.outstanding - a.outstanding);
   }, [shopsWithBalance, shopSearch, selectedBookerFilter]);
 
-  // ==================== BATCH QUICK PAY LOGIC ====================
+  // ==================== BATCH QUICK PAY LOGIC WITH BILL DROPDOWN ====================
   const payBookerShops = useMemo(() => {
     return shopsWithBalance
       .filter(s => s.booker_id === payBookerId)
       .filter(s => !payOnlyDue || s.outstanding > 0)
-      .filter(s => s.name.toLowerCase().includes(paySearch.toLowerCase()) || (s.contact && s.contact.includes(paySearch)))
+      .filter(s => {
+        const q = paySearch.trim().toLowerCase();
+        return !q || s.name.toLowerCase().includes(q) || (s.contact && s.contact.toLowerCase().includes(q));
+      })
       .sort((a, b) => b.outstanding - a.outstanding);
   }, [shopsWithBalance, payBookerId, payOnlyDue, paySearch]);
 
@@ -264,6 +283,23 @@ export default function App() {
     return Object.values(payAmounts).filter(val => (parseFloat(val) || 0) > 0).length;
   }, [payAmounts]);
 
+  // Helper to get pending/due bills for a shop
+  const getShopDueBills = useCallback((shopId: string) => {
+    const sBills = (shopBillsMap.get(shopId) || [])
+      .slice()
+      .sort((a, b) => new Date(a.bill_date).getTime() - new Date(b.bill_date).getTime());
+
+    return sBills.map(bill => {
+      const bPays = billPaymentsMap.get(bill.id) || [];
+      const state = computeBillState(bill, bPays);
+      return {
+        ...bill,
+        ...state
+      };
+    }).filter(b => b.outstanding > 0);
+  }, [shopBillsMap, billPaymentsMap]);
+
+  // Submit Batch Payments (Handles BOTH Specific Bill Allocation and FIFO)
   const handleBatchPaySubmit = async () => {
     if (payBatchCount === 0 || payBatchTotal <= 0) {
       alert('Please enter payment amounts for at least one shop.');
@@ -273,21 +309,34 @@ export default function App() {
     setPaySubmitting(true);
     try {
       const allOps: any[] = [];
-      const shopBillsAsc = bills.slice().sort((a, b) => new Date(a.bill_date).getTime() - new Date(b.bill_date).getTime());
 
       for (const [shopId, amountStr] of Object.entries(payAmounts)) {
-        let remaining = parseFloat(amountStr) || 0;
-        if (remaining <= 0) continue;
+        const totalPay = parseFloat(amountStr) || 0;
+        if (totalPay <= 0) continue;
 
-        const shopBills = shopBillsAsc.filter(b => b.shop_id === shopId);
-        
-        for (const bill of shopBills) {
-          if (remaining <= 0) break;
-          const bPayments = payments.filter(p => p.bill_id === bill.id);
-          const { outstanding } = computeBillState(bill, bPayments);
+        const targetBillId = paySelectedBills[shopId];
+        const shopDueBills = getShopDueBills(shopId);
 
-          if (outstanding > 0) {
-            const allocation = Math.min(remaining, outstanding);
+        // CASE 1: SPECIFIC BILL SELECTED IN DROPDOWN
+        if (targetBillId && targetBillId !== 'FIFO') {
+          const specificBill = shopDueBills.find(b => b.id === targetBillId);
+          allOps.push({
+            id: uid('pay'),
+            bill_id: targetBillId,
+            amount: totalPay,
+            payment_date: payDate,
+            mode: payMode,
+            ref: (payNotes ? payNotes + ' • ' : '') + `Targeted Bill (${specificBill?.bill_date || ''})`,
+            createdAt: now(),
+            updatedAt: now()
+          });
+        } 
+        // CASE 2: DEFAULT FIFO (AUTO-DISTRIBUTE ACROSS OLDEST BILLS)
+        else {
+          let remaining = totalPay;
+          for (const bill of shopDueBills) {
+            if (remaining <= 0) break;
+            const allocation = Math.min(remaining, bill.outstanding);
             allOps.push({
               id: uid('pay'),
               bill_id: bill.id,
@@ -300,25 +349,25 @@ export default function App() {
             });
             remaining -= allocation;
           }
-        }
 
-        // Excess / Advance Payment to last bill
-        if (remaining > 0 && shopBills.length > 0) {
-          allOps.push({
-            id: uid('pay'),
-            bill_id: shopBills[shopBills.length - 1].id,
-            amount: remaining,
-            payment_date: payDate,
-            mode: payMode,
-            ref: (payNotes ? payNotes + ' ' : '') + '(Advance)',
-            createdAt: now(),
-            updatedAt: now()
-          });
+          // Excess advance to latest bill
+          if (remaining > 0 && shopDueBills.length > 0) {
+            allOps.push({
+              id: uid('pay'),
+              bill_id: shopDueBills[shopDueBills.length - 1].id,
+              amount: remaining,
+              payment_date: payDate,
+              mode: payMode,
+              ref: (payNotes ? payNotes + ' ' : '') + '(Advance)',
+              createdAt: now(),
+              updatedAt: now()
+            });
+          }
         }
       }
 
       if (allOps.length === 0) {
-        alert('No outstanding bills found to allocate these payments to.');
+        alert('No valid bill allocations could be created.');
         setPaySubmitting(false);
         return;
       }
@@ -328,6 +377,7 @@ export default function App() {
 
       setPaySuccessMsg(`✓ Successfully processed ${payBatchCount} shops (${formatCurrency(payBatchTotal)})!`);
       setPayAmounts({});
+      setPaySelectedBills({});
       setTimeout(() => setPaySuccessMsg(''), 5000);
       await loadData();
     } catch (err: any) {
@@ -341,7 +391,10 @@ export default function App() {
   const billBookerShops = useMemo(() => {
     return shopsWithBalance
       .filter(s => s.booker_id === billBookerId)
-      .filter(s => s.name.toLowerCase().includes(billSearch.toLowerCase()) || (s.contact && s.contact.includes(billSearch)))
+      .filter(s => {
+        const q = billSearch.trim().toLowerCase();
+        return !q || s.name.toLowerCase().includes(q) || (s.contact && s.contact.toLowerCase().includes(q));
+      })
       .sort((a, b) => a.name.localeCompare(b.name));
   }, [shopsWithBalance, billBookerId, billSearch]);
 
@@ -415,7 +468,7 @@ export default function App() {
   return (
     <div className="flex flex-col min-h-screen bg-slate-950 text-slate-100 max-w-lg mx-auto shadow-2xl relative pb-24">
       {/* Top Header */}
-      <header className="sticky top-0 z-30 bg-slate-900/90 backdrop-blur-md border-b border-slate-800 px-4 py-3 flex items-center justify-between">
+      <header className="sticky top-0 z-40 bg-slate-900/95 backdrop-blur-md border-b border-slate-800 px-4 py-3 flex items-center justify-between">
         <div className="flex items-center space-x-2.5">
           <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-amber-500 via-rose-500 to-indigo-600 flex items-center justify-center shadow-lg shadow-rose-500/20">
             <span className="font-black text-sm text-white tracking-wider">MF</span>
@@ -581,7 +634,7 @@ export default function App() {
             )}
 
             {/* ============================================================== */}
-            {/* TAB: QUICK PAY (BATCH MARKET RECOVERY - DESKTOP PARITY)       */}
+            {/* TAB: QUICK PAY (BATCH RECOVERY WITH BILL DROPDOWNS)            */}
             {/* ============================================================== */}
             {activeTab === 'quickpay' && (
               <div className="space-y-3">
@@ -594,12 +647,15 @@ export default function App() {
                       </div>
                       <div>
                         <h2 className="text-sm font-bold text-slate-100">Quick Payments (Batch)</h2>
-                        <p className="text-[10px] text-slate-400">Type amounts down the shop list</p>
+                        <p className="text-[10px] text-slate-400">Select bill or auto-FIFO distribute</p>
                       </div>
                     </div>
                     {payBatchCount > 0 && (
                       <button
-                        onClick={() => setPayAmounts({})}
+                        onClick={() => {
+                          setPayAmounts({});
+                          setPaySelectedBills({});
+                        }}
                         className="text-[11px] text-rose-400 hover:text-rose-300 font-semibold"
                       >
                         Clear All
@@ -616,6 +672,7 @@ export default function App() {
                         onChange={e => {
                           setPayBookerId(e.target.value);
                           setPayAmounts({});
+                          setPaySelectedBills({});
                         }}
                         className="w-full p-2 rounded-xl bg-slate-950 border border-slate-800 text-xs font-bold text-slate-200"
                       >
@@ -688,8 +745,8 @@ export default function App() {
                   </div>
                 )}
 
-                {/* Shops Batch List */}
-                <div className="space-y-2 pb-16">
+                {/* Shops Batch List with Bill Dropdown */}
+                <div className="space-y-2.5 pb-20">
                   {payBookerShops.length === 0 ? (
                     <div className="text-center py-12 text-slate-500 text-xs">
                       No shops found matching filter for this booker.
@@ -698,51 +755,101 @@ export default function App() {
                     payBookerShops.map(shop => {
                       const val = payAmounts[shop.id] || '';
                       const hasVal = (parseFloat(val) || 0) > 0;
+                      const dueBills = getShopDueBills(shop.id);
+                      const selectedBillId = paySelectedBills[shop.id] || 'FIFO';
+                      const selectedBillObj = dueBills.find(b => b.id === selectedBillId);
 
                       return (
                         <div 
                           key={shop.id}
-                          className={`p-3 rounded-xl border transition flex items-center justify-between gap-2 ${
+                          className={`p-3.5 rounded-2xl border transition space-y-2.5 ${
                             hasVal 
-                              ? 'bg-rose-950/30 border-rose-500/50 shadow-md' 
-                              : 'bg-slate-900/90 border-slate-800/80'
+                              ? 'bg-rose-950/25 border-rose-500/50 shadow-md ring-1 ring-rose-500/20' 
+                              : 'bg-slate-900/90 border-slate-800/80 shadow-sm'
                           }`}
                         >
-                          <div className="flex-1 min-w-0 pr-2">
-                            <h4 className="text-xs font-bold text-slate-100 truncate">{shop.name}</h4>
-                            <div className="flex items-center gap-2 mt-0.5 text-[10px] text-slate-400">
-                              <span>Due: <strong className="text-rose-400">{formatCurrency(shop.outstanding)}</strong></span>
-                              {shop.billsCount > 0 && <span>• {shop.billsCount} bills</span>}
+                          {/* Top Row: Shop Name, Due, Amount Input */}
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="flex-1 min-w-0 pr-1">
+                              <h4 className="text-xs font-bold text-slate-100 truncate">{shop.name}</h4>
+                              <div className="flex items-center gap-2 mt-0.5 text-[10px] text-slate-400">
+                                <span>Total Due: <strong className="text-rose-400">{formatCurrency(shop.outstanding)}</strong></span>
+                                <span>• {dueBills.length} due {dueBills.length === 1 ? 'bill' : 'bills'}</span>
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              {/* Quick Auto-fill button */}
+                              {shop.outstanding > 0 && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const fillAmt = selectedBillObj ? selectedBillObj.outstanding : shop.outstanding;
+                                    setPayAmounts({ ...payAmounts, [shop.id]: String(fillAmt) });
+                                  }}
+                                  className="px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-[10px] font-bold text-slate-300 active:scale-95 transition"
+                                  title="Fill Exact Due Amount"
+                                >
+                                  {selectedBillObj ? 'Fill Bill' : 'Full Due'}
+                                </button>
+                              )}
+
+                              {/* Amount input */}
+                              <input 
+                                type="number"
+                                inputMode="decimal"
+                                placeholder="0.00"
+                                value={val}
+                                onChange={e => setPayAmounts({ ...payAmounts, [shop.id]: e.target.value })}
+                                className={`w-28 p-2 rounded-xl text-right text-xs font-black outline-none border transition ${
+                                  hasVal
+                                    ? 'bg-rose-500/20 border-rose-500 text-rose-300 focus:ring-2 focus:ring-rose-500/40'
+                                    : 'bg-slate-950 border-slate-800 text-white focus:border-rose-500'
+                                }`}
+                              />
                             </div>
                           </div>
 
-                          <div className="flex items-center gap-1.5">
-                            {/* Auto-fill full balance button */}
-                            {shop.outstanding > 0 && (
-                              <button
-                                type="button"
-                                onClick={() => setPayAmounts({ ...payAmounts, [shop.id]: String(shop.outstanding) })}
-                                className="px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-[10px] font-bold text-slate-300 active:scale-95"
-                                title="Full Due"
-                              >
-                                Full
-                              </button>
-                            )}
+                          {/* BILL SELECTION DROPDOWN: Which bill to pay against */}
+                          {dueBills.length > 0 && (
+                            <div className="pt-2 border-t border-slate-800/80 flex flex-col gap-1">
+                              <div className="flex items-center justify-between text-[10px] text-slate-400">
+                                <span className="font-semibold flex items-center gap-1">
+                                  <Layers size={11} className="text-indigo-400" />
+                                  Target Bill:
+                                </span>
+                                {selectedBillObj && (
+                                  <span className="text-rose-400 font-bold">
+                                    Bill Due: {formatCurrency(selectedBillObj.outstanding)}
+                                  </span>
+                                )}
+                              </div>
 
-                            {/* Amount input */}
-                            <input 
-                              type="number"
-                              inputMode="decimal"
-                              placeholder="0.00"
-                              value={val}
-                              onChange={e => setPayAmounts({ ...payAmounts, [shop.id]: e.target.value })}
-                              className={`w-28 p-2 rounded-xl text-right text-xs font-extrabold outline-none border transition ${
-                                hasVal
-                                  ? 'bg-rose-500/20 border-rose-500 text-rose-300 focus:ring-2 focus:ring-rose-500/40'
-                                  : 'bg-slate-950 border-slate-800 text-white focus:border-rose-500'
-                              }`}
-                            />
-                          </div>
+                              <div className="relative">
+                                <select
+                                  value={selectedBillId}
+                                  onChange={e => {
+                                    const newBillId = e.target.value;
+                                    setPaySelectedBills({ ...paySelectedBills, [shop.id]: newBillId });
+                                    // If user changes bill and already entered amount, they can adjust or keep
+                                  }}
+                                  className={`w-full p-2 pr-7 rounded-xl text-[11px] font-medium appearance-none border transition outline-none ${
+                                    selectedBillId !== 'FIFO'
+                                      ? 'bg-indigo-950/40 border-indigo-500/50 text-indigo-200'
+                                      : 'bg-slate-950 border-slate-800 text-slate-300'
+                                  }`}
+                                >
+                                  <option value="FIFO">⚡ Auto FIFO (Settle Oldest Bills First)</option>
+                                  {dueBills.map(b => (
+                                    <option key={b.id} value={b.id}>
+                                      Bill Date: {b.bill_date} • Due: {formatCurrency(b.outstanding)} (Total: {formatCurrency(b.total)})
+                                    </option>
+                                  ))}
+                                </select>
+                                <ChevronDown size={13} className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+                              </div>
+                            </div>
+                          )}
                         </div>
                       );
                     })
@@ -780,7 +887,7 @@ export default function App() {
             )}
 
             {/* ============================================================== */}
-            {/* TAB: QUICK BILLS (BATCH INVOICE ENTRY - DESKTOP PARITY)        */}
+            {/* TAB: QUICK BILLS (BATCH INVOICE ENTRY)                         */}
             {/* ============================================================== */}
             {activeTab === 'quickbills' && (
               <div className="space-y-3">
@@ -856,7 +963,7 @@ export default function App() {
                 )}
 
                 {/* Shops Batch List */}
-                <div className="space-y-2 pb-16">
+                <div className="space-y-2 pb-20">
                   {billBookerShops.length === 0 ? (
                     <div className="text-center py-12 text-slate-500 text-xs">
                       No shops found for this booker.
@@ -933,92 +1040,136 @@ export default function App() {
             )}
 
             {/* ============================================================== */}
-            {/* TAB: SHOPS & LEDGERS                                           */}
+            {/* TAB: SHOPS & LEDGERS (COMPLETELY REDESIGNED & POLISHED)        */}
             {/* ============================================================== */}
             {activeTab === 'shops' && (
-              <div className="space-y-3">
-                {/* Search & Booker Filter */}
-                <div className="space-y-2 sticky top-[57px] z-20 bg-slate-950 pt-1 pb-2">
+              <div className="space-y-3 pb-20">
+                {/* Search & Booker Filter Box */}
+                <div className="bg-slate-900/95 border border-slate-800/90 rounded-2xl p-3 shadow-md space-y-2.5">
+                  {/* Search Bar */}
                   <div className="relative">
-                    <Search size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                    <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                     <input 
                       type="text"
-                      placeholder="Search shop name, area..."
+                      placeholder="Search shop name, area, phone..."
                       value={shopSearch}
-                      onChange={e => setShopSearch(e.target.value)}
-                      className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-slate-900 border border-slate-800 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-rose-500 transition"
+                      onChange={e => {
+                        setShopSearch(e.target.value);
+                        setShopDisplayLimit(40); // Reset page limit on search
+                      }}
+                      className="w-full pl-9 pr-8 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-rose-500 transition"
                     />
                     {shopSearch && (
                       <button 
                         onClick={() => setShopSearch('')}
-                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
                       >
-                        <X size={15} />
+                        <X size={14} />
                       </button>
                     )}
                   </div>
 
-                  {/* Horizontal Booker Pills */}
-                  <div className="flex gap-1.5 overflow-x-auto pb-1 scrollbar-none">
+                  {/* Horizontal Booker Filter Bar */}
+                  <div className="flex gap-1.5 overflow-x-auto pb-1 scrollbar-none items-center">
                     <button
-                      onClick={() => setSelectedBookerFilter('ALL')}
-                      className={`px-3 py-1 rounded-lg text-xs font-medium whitespace-nowrap transition ${
+                      onClick={() => {
+                        setSelectedBookerFilter('ALL');
+                        setShopDisplayLimit(40);
+                      }}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap transition ${
                         selectedBookerFilter === 'ALL'
-                          ? 'bg-rose-500 text-white font-bold'
-                          : 'bg-slate-900 text-slate-400 border border-slate-800'
+                          ? 'bg-rose-500 text-white shadow-md shadow-rose-500/30'
+                          : 'bg-slate-950 text-slate-400 border border-slate-800 hover:text-slate-200'
                       }`}
                     >
-                      All Bookers ({shops.length})
+                      All ({shops.length})
                     </button>
                     {bookers.map(b => (
                       <button
                         key={b.id}
-                        onClick={() => setSelectedBookerFilter(b.id)}
-                        className={`px-3 py-1 rounded-lg text-xs font-medium whitespace-nowrap transition ${
+                        onClick={() => {
+                          setSelectedBookerFilter(b.id);
+                          setShopDisplayLimit(40);
+                        }}
+                        className={`px-3 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap transition ${
                           selectedBookerFilter === b.id
-                            ? 'bg-rose-500 text-white font-bold'
-                            : 'bg-slate-900 text-slate-400 border border-slate-800'
+                            ? 'bg-rose-500 text-white shadow-md shadow-rose-500/30'
+                            : 'bg-slate-950 text-slate-400 border border-slate-800 hover:text-slate-200'
                         }`}
                       >
                         {b.name}
                       </button>
                     ))}
                   </div>
+
+                  {/* Result Count Status */}
+                  <div className="flex items-center justify-between text-[11px] text-slate-400 px-1 pt-1 border-t border-slate-800/60">
+                    <span>Showing {Math.min(filteredShops.length, shopDisplayLimit)} of {filteredShops.length} shops</span>
+                    <span className="text-rose-400 font-semibold">
+                      Total: {formatCurrency(filteredShops.reduce((s, sh) => s + sh.outstanding, 0))}
+                    </span>
+                  </div>
                 </div>
 
                 {/* Shops List */}
                 <div className="space-y-2">
                   {filteredShops.length === 0 ? (
-                    <div className="text-center py-12 text-slate-500 text-sm">
+                    <div className="text-center py-16 bg-slate-900/40 rounded-2xl border border-slate-800/80 text-slate-500 text-xs">
                       No shops found matching your search.
                     </div>
                   ) : (
-                    filteredShops.map(shop => (
-                      <div 
-                        key={shop.id}
-                        onClick={() => setSelectedShop(shop)}
-                        className="p-3.5 rounded-xl bg-slate-900/90 border border-slate-800/90 hover:border-slate-700 active:scale-[0.99] transition cursor-pointer flex items-center justify-between shadow-sm"
-                      >
-                        <div className="flex-1 pr-2">
-                          <h4 className="text-sm font-bold text-slate-100 leading-tight">{shop.name}</h4>
-                          <div className="flex items-center gap-2 mt-1 text-[11px] text-slate-400">
-                            <span>{shop.bookerName}</span>
-                            {shop.contact && <span>• {shop.contact}</span>}
+                    <>
+                      {filteredShops.slice(0, shopDisplayLimit).map(shop => (
+                        <div 
+                          key={shop.id}
+                          onClick={() => setSelectedShop(shop)}
+                          className="p-3.5 rounded-2xl bg-slate-900/90 border border-slate-800/80 hover:border-slate-700 active:scale-[0.99] transition cursor-pointer flex items-center justify-between shadow-sm"
+                        >
+                          <div className="flex items-center gap-3 flex-1 min-w-0 pr-2">
+                            {/* Shop Initial Badge */}
+                            <div className="w-10 h-10 rounded-xl bg-slate-800/80 border border-slate-700/60 flex items-center justify-center font-black text-xs text-rose-400 shrink-0">
+                              {shop.name.slice(0, 2).toUpperCase()}
+                            </div>
+
+                            <div className="flex-1 min-w-0">
+                              <h4 className="text-xs font-bold text-slate-100 truncate leading-tight">{shop.name}</h4>
+                              <div className="flex items-center gap-2 mt-1 text-[10px] text-slate-400">
+                                <span className="text-slate-300 font-medium">{shop.bookerName}</span>
+                                {shop.contact && <span className="truncate">• {shop.contact}</span>}
+                              </div>
+                              {shop.overdueBillsCount > 0 && (
+                                <span className="inline-flex items-center gap-1 mt-1 text-[9px] px-1.5 py-0.5 rounded-md bg-rose-500/20 text-rose-400 border border-rose-500/30 font-bold">
+                                  <Clock size={10} />
+                                  {shop.overdueBillsCount} Overdue
+                                </span>
+                              )}
+                            </div>
                           </div>
-                          {shop.overdueBillsCount > 0 && (
-                            <span className="inline-block mt-1 text-[10px] px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-400 border border-rose-500/30 font-medium">
-                              {shop.overdueBillsCount} Overdue Bills
-                            </span>
-                          )}
-                        </div>
-                        <div className="text-right">
-                          <div className="text-sm font-extrabold text-rose-400">
-                            {formatCurrency(shop.outstanding)}
+
+                          <div className="text-right flex items-center gap-2 shrink-0">
+                            <div>
+                              <div className="text-xs font-black text-rose-400">
+                                {formatCurrency(shop.outstanding)}
+                              </div>
+                              <span className="text-[10px] text-slate-500 font-medium">Balance</span>
+                            </div>
+                            <ChevronRight size={15} className="text-slate-600" />
                           </div>
-                          <span className="text-[10px] text-slate-500 font-medium">Balance</span>
                         </div>
-                      </div>
-                    ))
+                      ))}
+
+                      {/* Load More Button */}
+                      {filteredShops.length > shopDisplayLimit && (
+                        <div className="pt-2 text-center">
+                          <button
+                            onClick={() => setShopDisplayLimit(prev => prev + 50)}
+                            className="w-full py-3 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-xs font-bold text-slate-300 active:scale-95 transition"
+                          >
+                            Load More Shops ({filteredShops.length - shopDisplayLimit} remaining)
+                          </button>
+                        </div>
+                      )}
+                    </>
                   )}
                 </div>
               </div>
@@ -1094,16 +1245,20 @@ export default function App() {
         )}
       </main>
 
-      {/* SHOP LEDGER MODAL */}
+      {/* ============================================================== */}
+      {/* SHOP LEDGER MODAL DRAWER                                       */}
+      {/* ============================================================== */}
       {selectedShop && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
-          <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-t-3xl sm:rounded-2xl max-h-[85vh] flex flex-col shadow-2xl animate-slide-up">
+          <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-t-3xl sm:rounded-2xl max-h-[90vh] flex flex-col shadow-2xl animate-slide-up">
+            {/* Header */}
             <div className="p-4 border-b border-slate-800 flex justify-between items-start">
               <div>
                 <h3 className="font-bold text-base text-white">{selectedShop.name}</h3>
                 <p className="text-xs text-slate-400">
                   {bookers.find(b => b.id === selectedShop.booker_id)?.name}
                   {selectedShop.contact && ` • ${selectedShop.contact}`}
+                  {selectedShop.address && ` • ${selectedShop.address}`}
                 </p>
               </div>
               <button 
@@ -1114,53 +1269,87 @@ export default function App() {
               </button>
             </div>
 
+            {/* Content */}
             <div className="p-4 overflow-y-auto flex-1 space-y-3">
-              <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex justify-between items-center">
-                <span className="text-xs text-slate-400">Outstanding Balance:</span>
-                <span className="text-base font-extrabold text-rose-400">
+              {/* Balance Summary Card */}
+              <div className="p-3.5 rounded-2xl bg-slate-950 border border-slate-800 flex justify-between items-center">
+                <div>
+                  <span className="text-[11px] text-slate-400 uppercase font-bold block">Outstanding Balance</span>
+                  <span className="text-xs text-slate-500">Unsettled credit</span>
+                </div>
+                <span className="text-lg font-black text-rose-400">
                   {formatCurrency(
                     bills
                       .filter(b => b.shop_id === selectedShop.id)
                       .reduce((sum, b) => {
-                        const bPayments = payments.filter(p => p.bill_id === b.id);
+                        const bPayments = billPaymentsMap.get(b.id) || [];
                         return sum + computeBillState(b, bPayments).outstanding;
                       }, 0)
                   )}
                 </span>
               </div>
 
-              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 pt-1">Bill History</h4>
+              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400 pt-1">
+                Bill by Bill Ledger ({bills.filter(b => b.shop_id === selectedShop.id).length} Bills)
+              </h4>
               
               <div className="space-y-2">
-                {bills.filter(b => b.shop_id === selectedShop.id).map(b => {
-                  const bPayments = payments.filter(p => p.bill_id === b.id);
-                  const state = computeBillState(b, bPayments);
-                  return (
-                    <div key={b.id} className="p-3 rounded-xl bg-slate-950/70 border border-slate-800 space-y-1.5 text-xs">
-                      <div className="flex justify-between">
-                        <span className="font-semibold text-slate-200">Date: {b.bill_date}</span>
-                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
-                          state.status === 'paid' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'
-                        }`}>
-                          {state.status}
-                        </span>
+                {bills
+                  .filter(b => b.shop_id === selectedShop.id)
+                  .sort((a, b) => new Date(b.bill_date).getTime() - new Date(a.bill_date).getTime())
+                  .map(b => {
+                    const bPayments = billPaymentsMap.get(b.id) || [];
+                    const state = computeBillState(b, bPayments);
+                    return (
+                      <div key={b.id} className="p-3 rounded-xl bg-slate-950/70 border border-slate-800 space-y-2 text-xs">
+                        <div className="flex justify-between items-center">
+                          <span className="font-bold text-slate-200">Date: {b.bill_date}</span>
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                            state.status === 'paid' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'
+                          }`}>
+                            {state.status}
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-3 gap-1 pt-1 border-t border-slate-800/80 text-[11px]">
+                          <div>
+                            <span className="text-slate-500 block">Total</span>
+                            <span className="font-semibold text-slate-300">{formatCurrency(state.total)}</span>
+                          </div>
+                          <div>
+                            <span className="text-slate-500 block">Paid</span>
+                            <span className="font-semibold text-emerald-400">{formatCurrency(state.paid)}</span>
+                          </div>
+                          <div className="text-right">
+                            <span className="text-slate-500 block">Due</span>
+                            <span className="font-black text-rose-400">{formatCurrency(state.outstanding)}</span>
+                          </div>
+                        </div>
+
+                        {/* List payments for this bill if any */}
+                        {bPayments.length > 0 && (
+                          <div className="pt-1.5 border-t border-slate-900 space-y-1">
+                            <span className="text-[10px] text-slate-500 block font-semibold">Payment History:</span>
+                            {bPayments.map(p => (
+                              <div key={p.id} className="flex justify-between text-[10px] text-slate-400 bg-slate-900/40 px-2 py-1 rounded">
+                                <span>{p.payment_date} ({p.mode || 'Cash'})</span>
+                                <span className="text-emerald-400 font-bold">{formatCurrency(p.amount)}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
-                      <div className="flex justify-between text-slate-400">
-                        <span>Total: {formatCurrency(state.total)}</span>
-                        <span>Paid: {formatCurrency(state.paid)}</span>
-                        <span className="font-bold text-rose-400">Bal: {formatCurrency(state.outstanding)}</span>
-                      </div>
-                    </div>
-                  );
-                })}
+                    );
+                  })}
               </div>
             </div>
 
+            {/* Footer Action */}
             <div className="p-4 border-t border-slate-800">
               <button
                 onClick={() => {
                   setPayBookerId(selectedShop.booker_id);
-                  setPayAmounts({ [selectedShop.id]: String(selectedShop.outstanding) });
+                  const bal = shopBalances.get(selectedShop.id)?.outstanding || 0;
+                  setPayAmounts({ [selectedShop.id]: String(bal) });
                   setSelectedShop(null);
                   setActiveTab('quickpay');
                 }}
