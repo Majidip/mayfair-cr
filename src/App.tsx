@@ -15,7 +15,12 @@ import {
   TrendingUp,
   AlertTriangle,
   Calendar,
-  Building2
+  Building2,
+  Check,
+  Save,
+  ArrowRight,
+  Filter,
+  DollarSign
 } from 'lucide-react';
 import { supabase } from './supabase';
 import { 
@@ -30,7 +35,7 @@ import {
 } from './utils/calculations';
 import { uid, today, now } from './utils/id';
 
-type Tab = 'dashboard' | 'shops' | 'quickpay' | 'bills' | 'audit';
+type Tab = 'dashboard' | 'quickpay' | 'quickbills' | 'shops' | 'audit';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('dashboard');
@@ -46,32 +51,35 @@ export default function App() {
   const [payments, setPayments] = useState<Payment[]>([]);
 
   // Selected Shop Modal for detailed ledger
-  const [selectedShop, setSelectedShop] = useState<Shop | null>(null);
+  const [selectedShop, setSelectedShop] = useState<(Shop & { outstanding?: number; bookerName?: string }) | null>(null);
 
   // Search and Filters
   const [shopSearch, setShopSearch] = useState('');
   const [selectedBookerFilter, setSelectedBookerFilter] = useState('ALL');
 
-  // Quick Pay State
+  // ==================== BATCH QUICK PAY STATE ====================
   const [payBookerId, setPayBookerId] = useState('');
-  const [payShopId, setPayShopId] = useState('');
-  const [payAmount, setPayAmount] = useState('');
   const [payDate, setPayDate] = useState(today());
   const [payMode, setPayMode] = useState('Cash');
   const [payNotes, setPayNotes] = useState('');
+  const [paySearch, setPaySearch] = useState('');
+  const [payOnlyDue, setPayOnlyDue] = useState(true);
+  // Map of shopId -> payment amount string
+  const [payAmounts, setPayAmounts] = useState<{ [shopId: string]: string }>({});
   const [paySubmitting, setPaySubmitting] = useState(false);
   const [paySuccessMsg, setPaySuccessMsg] = useState('');
 
-  // Add Bill State
-  const [showAddBillModal, setShowAddBillModal] = useState(false);
-  const [newBillBookerId, setNewBillBookerId] = useState('');
-  const [newBillShopId, setNewBillShopId] = useState('');
-  const [newBillAmount, setNewBillAmount] = useState('');
-  const [newBillDate, setNewBillDate] = useState(today());
-  const [newBillNotes, setNewBillNotes] = useState('');
+  // ==================== BATCH QUICK BILLS STATE ====================
+  const [billBookerId, setBillBookerId] = useState('');
+  const [billDate, setBillDate] = useState(today());
+  const [billSearch, setBillSearch] = useState('');
+  const [billNotes, setBillNotes] = useState('');
+  // Map of shopId -> new bill amount string
+  const [billAmounts, setBillAmounts] = useState<{ [shopId: string]: string }>({});
   const [billSubmitting, setBillSubmitting] = useState(false);
+  const [billSuccessMsg, setBillSuccessMsg] = useState('');
 
-  // Fetch all live data from Supabase (with limit 20000 so no 1000 row truncation occurs)
+  // Fetch all live data from Supabase
   const loadData = useCallback(async () => {
     try {
       setRefreshing(true);
@@ -84,7 +92,16 @@ export default function App() {
       ]);
 
       if (bizRes.data) setBusinesses(bizRes.data);
-      if (bookersRes.data) setBookers(bookersRes.data);
+      if (bookersRes.data) {
+        setBookers(bookersRes.data);
+        // Default select first booker if none selected
+        if (!payBookerId && bookersRes.data.length > 0) {
+          setPayBookerId(bookersRes.data[0].id);
+        }
+        if (!billBookerId && bookersRes.data.length > 0) {
+          setBillBookerId(bookersRes.data[0].id);
+        }
+      }
       if (shopsRes.data) setShops(shopsRes.data);
       if (billsRes.data) setBills(billsRes.data);
       if (paymentsRes.data) setPayments(paymentsRes.data);
@@ -97,12 +114,10 @@ export default function App() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [payBookerId, billBookerId]);
 
   useEffect(() => {
     loadData();
-
-    // Auto-refresh every 25 seconds for live background sync
     const interval = setInterval(loadData, 25000);
     return () => clearInterval(interval);
   }, [loadData]);
@@ -116,11 +131,9 @@ export default function App() {
     const todayStr = today();
     const currentMonth = todayStr.slice(0, 7);
 
-    // Payments for today
     let activeDatePayments = payments.filter(p => p.payment_date === todayStr);
     let activeRecoveryLabel = 'Daily Recovery (Today)';
 
-    // If today is early morning and has 0 punched payments yet, show latest batch date (Nov 05)
     if (activeDatePayments.length === 0 && payments.length > 0) {
       const latestDate = payments[0]?.payment_date || todayStr;
       activeDatePayments = payments.filter(p => p.payment_date === latestDate);
@@ -142,7 +155,6 @@ export default function App() {
       .filter(p => p.payment_date && p.payment_date.startsWith(currentMonth))
       .reduce((sum, p) => sum + Number(p.amount || 0), 0);
 
-    // Overdue bills matching desktop SQL
     let overdueBills = 0;
     bills.forEach(b => {
       const bPayments = payments.filter(p => p.bill_id === b.id);
@@ -169,35 +181,62 @@ export default function App() {
     };
   }, [bills, payments, shops]);
 
-  // Shop balances list
-  const shopsWithBalance = useMemo(() => {
-    return shops.map(shop => {
-      const shopBills = bills.filter(b => b.shop_id === shop.id);
-      let outstanding = 0;
-      let overdueBillsCount = 0;
+  // Shop balances map for quick calculations
+  const shopBalances = useMemo(() => {
+    const map = new Map<string, { outstanding: number; overdueCount: number; billCount: number }>();
+    
+    // Group bills by shop
+    const shopBillsMap = new Map<string, Bill[]>();
+    bills.forEach(b => {
+      if (!shopBillsMap.has(b.shop_id)) shopBillsMap.set(b.shop_id, []);
+      shopBillsMap.get(b.shop_id)!.push(b);
+    });
 
-      shopBills.forEach(b => {
-        const bPayments = payments.filter(p => p.bill_id === b.id);
-        const s = computeBillState(b, bPayments);
-        outstanding += s.outstanding;
-        if (s.outstanding > 0 && getDaysOverdue(b.bill_date) > 30) {
-          overdueBillsCount++;
+    // Group payments by bill
+    const billPaymentsMap = new Map<string, Payment[]>();
+    payments.forEach(p => {
+      if (!billPaymentsMap.has(p.bill_id)) billPaymentsMap.set(p.bill_id, []);
+      billPaymentsMap.get(p.bill_id)!.push(p);
+    });
+
+    const todayStr = today();
+
+    shops.forEach(shop => {
+      const sBills = shopBillsMap.get(shop.id) || [];
+      let outstanding = 0;
+      let overdueCount = 0;
+
+      sBills.forEach(b => {
+        const bPays = billPaymentsMap.get(b.id) || [];
+        const state = computeBillState(b, bPays);
+        outstanding += state.outstanding;
+        if (state.outstanding > 0 && b.due_date && b.due_date < todayStr) {
+          overdueCount++;
         }
       });
 
-      const booker = bookers.find(b => b.id === shop.booker_id);
+      map.set(shop.id, { outstanding, overdueCount, billCount: sBills.length });
+    });
 
+    return map;
+  }, [shops, bills, payments]);
+
+  // Shops with enriched balance data
+  const shopsWithBalance = useMemo(() => {
+    return shops.map(shop => {
+      const bInfo = shopBalances.get(shop.id) || { outstanding: 0, overdueCount: 0, billCount: 0 };
+      const booker = bookers.find(b => b.id === shop.booker_id);
       return {
         ...shop,
         bookerName: booker ? booker.name : 'Unassigned',
-        outstanding,
-        billsCount: shopBills.length,
-        overdueBillsCount
+        outstanding: bInfo.outstanding,
+        billsCount: bInfo.billCount,
+        overdueBillsCount: bInfo.overdueCount
       };
     });
-  }, [shops, bills, payments, bookers]);
+  }, [shops, shopBalances, bookers]);
 
-  // Filtered shops
+  // Filtered shops for General Shops tab
   const filteredShops = useMemo(() => {
     return shopsWithBalance.filter(s => {
       const matchesSearch = s.name.toLowerCase().includes(shopSearch.toLowerCase()) ||
@@ -208,114 +247,151 @@ export default function App() {
     }).sort((a, b) => b.outstanding - a.outstanding);
   }, [shopsWithBalance, shopSearch, selectedBookerFilter]);
 
-  // Handle Quick Payment Submit (FIFO distribution across shop bills)
-  const handleQuickPaySubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const amountNum = parseFloat(payAmount);
-    if (!payShopId || isNaN(amountNum) || amountNum <= 0) {
-      alert('Please select a shop and enter a valid payment amount.');
+  // ==================== BATCH QUICK PAY LOGIC ====================
+  const payBookerShops = useMemo(() => {
+    return shopsWithBalance
+      .filter(s => s.booker_id === payBookerId)
+      .filter(s => !payOnlyDue || s.outstanding > 0)
+      .filter(s => s.name.toLowerCase().includes(paySearch.toLowerCase()) || (s.contact && s.contact.includes(paySearch)))
+      .sort((a, b) => b.outstanding - a.outstanding);
+  }, [shopsWithBalance, payBookerId, payOnlyDue, paySearch]);
+
+  const payBatchTotal = useMemo(() => {
+    return Object.values(payAmounts).reduce((sum, val) => sum + (parseFloat(val) || 0), 0);
+  }, [payAmounts]);
+
+  const payBatchCount = useMemo(() => {
+    return Object.values(payAmounts).filter(val => (parseFloat(val) || 0) > 0).length;
+  }, [payAmounts]);
+
+  const handleBatchPaySubmit = async () => {
+    if (payBatchCount === 0 || payBatchTotal <= 0) {
+      alert('Please enter payment amounts for at least one shop.');
       return;
     }
 
     setPaySubmitting(true);
     try {
-      const shopBills = bills
-        .filter(b => b.shop_id === payShopId)
-        .sort((a, b) => new Date(a.bill_date).getTime() - new Date(b.bill_date).getTime());
+      const allOps: any[] = [];
+      const shopBillsAsc = bills.slice().sort((a, b) => new Date(a.bill_date).getTime() - new Date(b.bill_date).getTime());
 
-      let remainingAmount = amountNum;
-      const newPaymentRecords: any[] = [];
+      for (const [shopId, amountStr] of Object.entries(payAmounts)) {
+        let remaining = parseFloat(amountStr) || 0;
+        if (remaining <= 0) continue;
 
-      for (const bill of shopBills) {
-        if (remainingAmount <= 0) break;
-        const bPayments = payments.filter(p => p.bill_id === bill.id);
-        const { outstanding } = computeBillState(bill, bPayments);
+        const shopBills = shopBillsAsc.filter(b => b.shop_id === shopId);
+        
+        for (const bill of shopBills) {
+          if (remaining <= 0) break;
+          const bPayments = payments.filter(p => p.bill_id === bill.id);
+          const { outstanding } = computeBillState(bill, bPayments);
 
-        if (outstanding > 0) {
-          const allocation = Math.min(remainingAmount, outstanding);
-          newPaymentRecords.push({
+          if (outstanding > 0) {
+            const allocation = Math.min(remaining, outstanding);
+            allOps.push({
+              id: uid('pay'),
+              bill_id: bill.id,
+              amount: allocation,
+              payment_date: payDate,
+              mode: payMode,
+              ref: payNotes || '',
+              createdAt: now(),
+              updatedAt: now()
+            });
+            remaining -= allocation;
+          }
+        }
+
+        // Excess / Advance Payment to last bill
+        if (remaining > 0 && shopBills.length > 0) {
+          allOps.push({
             id: uid('pay'),
-            bill_id: bill.id,
-            amount: allocation,
+            bill_id: shopBills[shopBills.length - 1].id,
+            amount: remaining,
             payment_date: payDate,
             mode: payMode,
-            ref: payNotes || '',
+            ref: (payNotes ? payNotes + ' ' : '') + '(Advance)',
             createdAt: now(),
             updatedAt: now()
           });
-          remainingAmount -= allocation;
         }
       }
 
-      if (remainingAmount > 0 && shopBills.length > 0) {
-        newPaymentRecords.push({
-          id: uid('pay'),
-          bill_id: shopBills[shopBills.length - 1].id,
-          amount: remainingAmount,
-          payment_date: payDate,
-          mode: payMode,
-          ref: (payNotes ? payNotes + ' ' : '') + '(Advance/Excess)',
-          createdAt: now(),
-          updatedAt: now()
-        });
-      }
-
-      if (newPaymentRecords.length === 0) {
-        alert('This shop has no outstanding bills to allocate to.');
+      if (allOps.length === 0) {
+        alert('No outstanding bills found to allocate these payments to.');
         setPaySubmitting(false);
         return;
       }
 
-      const { error } = await supabase.from('payments').insert(newPaymentRecords);
+      const { error } = await supabase.from('payments').insert(allOps);
       if (error) throw error;
 
-      setPaySuccessMsg(`✓ Rs. ${Math.round(amountNum).toLocaleString()} successfully recorded & synced!`);
-      setPayAmount('');
-      setPayNotes('');
-      setTimeout(() => setPaySuccessMsg(''), 4000);
+      setPaySuccessMsg(`✓ Successfully processed ${payBatchCount} shops (${formatCurrency(payBatchTotal)})!`);
+      setPayAmounts({});
+      setTimeout(() => setPaySuccessMsg(''), 5000);
       await loadData();
     } catch (err: any) {
-      alert('Failed to save payment: ' + (err.message || err));
+      alert('Failed to save batch payments: ' + (err.message || err));
     } finally {
       setPaySubmitting(false);
     }
   };
 
-  // Handle Add New Bill
-  const handleAddBillSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const amountNum = parseFloat(newBillAmount);
-    if (!newBillShopId || !newBillBookerId || isNaN(amountNum) || amountNum <= 0) {
-      alert('Please fill all required bill fields.');
+  // ==================== BATCH QUICK BILLS LOGIC ====================
+  const billBookerShops = useMemo(() => {
+    return shopsWithBalance
+      .filter(s => s.booker_id === billBookerId)
+      .filter(s => s.name.toLowerCase().includes(billSearch.toLowerCase()) || (s.contact && s.contact.includes(billSearch)))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [shopsWithBalance, billBookerId, billSearch]);
+
+  const billBatchTotal = useMemo(() => {
+    return Object.values(billAmounts).reduce((sum, val) => sum + (parseFloat(val) || 0), 0);
+  }, [billAmounts]);
+
+  const billBatchCount = useMemo(() => {
+    return Object.values(billAmounts).filter(val => (parseFloat(val) || 0) > 0).length;
+  }, [billAmounts]);
+
+  const handleBatchBillSubmit = async () => {
+    if (billBatchCount === 0 || billBatchTotal <= 0) {
+      alert('Please enter bill amounts for at least one shop.');
       return;
     }
 
     setBillSubmitting(true);
     try {
-      const booker = bookers.find(b => b.id === newBillBookerId);
-      const newBill = {
-        id: uid('bill'),
-        shop_id: newBillShopId,
-        booker_id: newBillBookerId,
-        business_id: booker?.business_id || businesses[0]?.id || 'biz_mfl6h6zu_7597',
-        amount: amountNum,
-        bill_date: newBillDate,
-        due_date: newBillDate,
-        notes: newBillNotes || '',
-        createdAt: now(),
-        updatedAt: now()
-      };
+      const booker = bookers.find(b => b.id === billBookerId);
+      const bizId = booker?.business_id || businesses[0]?.id || 'biz_mfl6h6zu_7597';
 
-      const { error } = await supabase.from('bills').insert([newBill]);
+      const newBills: any[] = [];
+      for (const [shopId, val] of Object.entries(billAmounts)) {
+        const amount = parseFloat(val) || 0;
+        if (amount <= 0) continue;
+
+        newBills.push({
+          id: uid('bill'),
+          shop_id: shopId,
+          booker_id: billBookerId,
+          business_id: bizId,
+          amount: amount,
+          bill_date: billDate,
+          due_date: billDate,
+          notes: billNotes || '',
+          createdAt: now(),
+          updatedAt: now()
+        });
+      }
+
+      const { error } = await supabase.from('bills').insert(newBills);
       if (error) throw error;
 
-      alert('✓ Bill created and synced to cloud successfully!');
-      setShowAddBillModal(false);
-      setNewBillAmount('');
-      setNewBillNotes('');
+      setBillSuccessMsg(`✓ Successfully created ${billBatchCount} bills (${formatCurrency(billBatchTotal)})!`);
+      setBillAmounts({});
+      setTimeout(() => setBillSuccessMsg(''), 5000);
       await loadData();
     } catch (err: any) {
-      alert('Failed to create bill: ' + (err.message || err));
+      alert('Failed to generate bills: ' + (err.message || err));
     } finally {
       setBillSubmitting(false);
     }
@@ -324,7 +400,6 @@ export default function App() {
   // WhatsApp Share daily recovery report
   const handleShareWhatsApp = () => {
     const todayStr = today();
-    
     let text = `*📊 MAYFAIR DAILY RECOVERY REPORT*\n`;
     text += `*Date:* ${todayStr}\n`;
     text += `*Total Recovery:* ${formatCurrency(stats.dailyCollection)}\n`;
@@ -338,7 +413,7 @@ export default function App() {
   };
 
   return (
-    <div className="flex flex-col min-h-screen bg-slate-950 text-slate-100 max-w-lg mx-auto shadow-2xl relative pb-20">
+    <div className="flex flex-col min-h-screen bg-slate-950 text-slate-100 max-w-lg mx-auto shadow-2xl relative pb-24">
       {/* Top Header */}
       <header className="sticky top-0 z-30 bg-slate-900/90 backdrop-blur-md border-b border-slate-800 px-4 py-3 flex items-center justify-between">
         <div className="flex items-center space-x-2.5">
@@ -375,10 +450,12 @@ export default function App() {
           </div>
         ) : (
           <>
-            {/* TAB: DASHBOARD (MATCHES DESKTOP VIEW 100%) */}
+            {/* ============================================================== */}
+            {/* TAB: DASHBOARD (EXACT 100% PARITY TO DESKTOP VIEW)            */}
+            {/* ============================================================== */}
             {activeTab === 'dashboard' && (
               <div className="space-y-4">
-                {/* 1. TOTAL OUTSTANDING CARD */}
+                {/* 1. TOTAL OUTSTANDING HERO CARD */}
                 <div className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-indigo-900/60 via-slate-900 to-slate-900 border border-indigo-500/40 p-5 shadow-xl">
                   <div className="flex justify-between items-start mb-2">
                     <span className="text-xs font-bold uppercase tracking-wider text-indigo-300">TOTAL OUTSTANDING</span>
@@ -392,9 +469,8 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* 2. RECOVERY STATS ROW (MATCHES DESKTOP KPI CARDS) */}
+                {/* 2. RECOVERY STATS ROW */}
                 <div className="grid grid-cols-2 gap-3">
-                  {/* Daily Recovery Card */}
                   <div className="rounded-2xl bg-slate-900/90 border border-slate-800 p-4 shadow-lg">
                     <div className="flex justify-between items-center mb-1">
                       <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">DAILY RECOVERY</span>
@@ -406,7 +482,6 @@ export default function App() {
                     <span className="text-[10px] text-slate-400 block">{stats.activeRecoveryLabel}</span>
                   </div>
 
-                  {/* Monthly Recovery Card */}
                   <div className="rounded-2xl bg-slate-900/90 border border-slate-800 p-4 shadow-lg">
                     <div className="flex justify-between items-center mb-1">
                       <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">MONTHLY RECOVERY</span>
@@ -444,39 +519,7 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Daily Recovery Breakdown (Cash vs Returns) */}
-                <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-4 shadow-lg">
-                  <div className="flex items-center justify-between mb-3">
-                    <div className="flex items-center gap-2">
-                      <TrendingUp size={18} className="text-rose-400" />
-                      <h2 className="text-sm font-bold text-slate-200">Payment Modes Breakdown</h2>
-                    </div>
-                    <button 
-                      onClick={handleShareWhatsApp}
-                      className="flex items-center gap-1 text-xs px-2.5 py-1 rounded-lg bg-emerald-600/20 text-emerald-400 border border-emerald-500/30 hover:bg-emerald-600/30 active:scale-95 transition"
-                    >
-                      <Share2 size={13} />
-                      WhatsApp
-                    </button>
-                  </div>
-
-                  <div className="grid grid-cols-3 gap-2">
-                    <div className="bg-slate-950/60 rounded-xl p-2.5 border border-slate-800">
-                      <span className="text-[10px] text-slate-400 block font-medium">💵 Cash</span>
-                      <span className="text-xs font-bold text-emerald-300">{formatCurrency(stats.dailyCash)}</span>
-                    </div>
-                    <div className="bg-slate-950/60 rounded-xl p-2.5 border border-slate-800">
-                      <span className="text-[10px] text-slate-400 block font-medium">🔄 Returns</span>
-                      <span className="text-xs font-bold text-amber-300">{formatCurrency(stats.dailyNonCash)}</span>
-                    </div>
-                    <div className="bg-slate-950/60 rounded-xl p-2.5 border border-slate-800">
-                      <span className="text-[10px] text-slate-400 block font-medium">🏦 Online</span>
-                      <span className="text-xs font-bold text-sky-300">{formatCurrency(stats.dailyOnline)}</span>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Quick Action Shortcuts */}
+                {/* Quick Action Buttons */}
                 <div className="grid grid-cols-2 gap-3">
                   <button 
                     onClick={() => setActiveTab('quickpay')}
@@ -486,21 +529,21 @@ export default function App() {
                       <Zap size={20} />
                     </div>
                     <div>
-                      <span className="text-sm font-bold text-slate-100 block">Record Payment</span>
-                      <span className="text-[11px] text-slate-400">Quick market recovery</span>
+                      <span className="text-sm font-bold text-slate-100 block">Quick Payments</span>
+                      <span className="text-[11px] text-slate-400">Batch market recovery</span>
                     </div>
                   </button>
 
                   <button 
-                    onClick={() => setShowAddBillModal(true)}
+                    onClick={() => setActiveTab('quickbills')}
                     className="p-4 rounded-2xl bg-gradient-to-br from-indigo-600/20 to-indigo-900/10 border border-indigo-500/30 flex flex-col items-start gap-2 hover:border-indigo-500/50 active:scale-95 transition text-left"
                   >
                     <div className="w-9 h-9 rounded-xl bg-indigo-500/20 text-indigo-400 flex items-center justify-center">
-                      <Plus size={20} />
+                      <Receipt size={20} />
                     </div>
                     <div>
-                      <span className="text-sm font-bold text-slate-100 block">Add New Bill</span>
-                      <span className="text-[11px] text-slate-400">Direct invoice entry</span>
+                      <span className="text-sm font-bold text-slate-100 block">Quick Bills</span>
+                      <span className="text-[11px] text-slate-400">Batch invoice generation</span>
                     </div>
                   </button>
                 </div>
@@ -510,20 +553,20 @@ export default function App() {
                   <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-3">Mayfair Booker Balances</h3>
                   <div className="space-y-2">
                     {bookers.map(b => {
-                      const bookerShops = shopsWithBalance.filter(s => s.booker_id === b.id);
-                      const totalBal = bookerShops.reduce((sum, s) => sum + s.outstanding, 0);
+                      const bShops = shopsWithBalance.filter(s => s.booker_id === b.id);
+                      const totalBal = bShops.reduce((sum, s) => sum + s.outstanding, 0);
                       return (
                         <div 
                           key={b.id}
                           onClick={() => {
-                            setSelectedBookerFilter(b.id);
-                            setActiveTab('shops');
+                            setPayBookerId(b.id);
+                            setActiveTab('quickpay');
                           }}
                           className="flex items-center justify-between p-2.5 rounded-xl bg-slate-950/40 border border-slate-800/80 hover:bg-slate-800/50 active:scale-[0.98] transition cursor-pointer"
                         >
                           <div>
                             <span className="text-sm font-semibold text-slate-200 block">{b.name}</span>
-                            <span className="text-[11px] text-slate-400">{bookerShops.length} shops</span>
+                            <span className="text-[11px] text-slate-400">{bShops.length} shops</span>
                           </div>
                           <div className="text-right flex items-center gap-1.5">
                             <span className="text-xs font-bold text-rose-400">{formatCurrency(totalBal)}</span>
@@ -537,7 +580,361 @@ export default function App() {
               </div>
             )}
 
-            {/* TAB: SHOPS & LEDGERS */}
+            {/* ============================================================== */}
+            {/* TAB: QUICK PAY (BATCH MARKET RECOVERY - DESKTOP PARITY)       */}
+            {/* ============================================================== */}
+            {activeTab === 'quickpay' && (
+              <div className="space-y-3">
+                {/* Header Card */}
+                <div className="p-3.5 bg-slate-900/90 border border-slate-800 rounded-2xl shadow-sm">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-2">
+                      <div className="w-8 h-8 rounded-lg bg-rose-500/20 text-rose-400 flex items-center justify-center font-bold">
+                        <Zap size={17} />
+                      </div>
+                      <div>
+                        <h2 className="text-sm font-bold text-slate-100">Quick Payments (Batch)</h2>
+                        <p className="text-[10px] text-slate-400">Type amounts down the shop list</p>
+                      </div>
+                    </div>
+                    {payBatchCount > 0 && (
+                      <button
+                        onClick={() => setPayAmounts({})}
+                        className="text-[11px] text-rose-400 hover:text-rose-300 font-semibold"
+                      >
+                        Clear All
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Booker & Date Selector */}
+                  <div className="grid grid-cols-2 gap-2 mb-2">
+                    <div>
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">Booker</label>
+                      <select 
+                        value={payBookerId}
+                        onChange={e => {
+                          setPayBookerId(e.target.value);
+                          setPayAmounts({});
+                        }}
+                        className="w-full p-2 rounded-xl bg-slate-950 border border-slate-800 text-xs font-bold text-slate-200"
+                      >
+                        {bookers.map(b => (
+                          <option key={b.id} value={b.id}>{b.name}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">Date</label>
+                      <input 
+                        type="date"
+                        value={payDate}
+                        onChange={e => setPayDate(e.target.value)}
+                        className="w-full p-2 rounded-xl bg-slate-950 border border-slate-800 text-xs font-bold text-slate-200"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Mode Selector */}
+                  <div className="flex gap-1.5 overflow-x-auto pb-1 mb-2 scrollbar-none">
+                    {['Cash', 'Return', 'Credit Note', 'Online Transfer', 'Cheque'].map(m => (
+                      <button
+                        key={m}
+                        type="button"
+                        onClick={() => setPayMode(m)}
+                        className={`px-2.5 py-1 rounded-lg text-xs font-bold transition whitespace-nowrap ${
+                          payMode === m 
+                            ? m === 'Cash' 
+                              ? 'bg-emerald-600 text-white' 
+                              : m === 'Return' || m === 'Credit Note'
+                              ? 'bg-amber-600 text-white'
+                              : 'bg-indigo-600 text-white'
+                            : 'bg-slate-950 text-slate-400 border border-slate-800'
+                        }`}
+                      >
+                        {m}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Search and Toggle Filter */}
+                  <div className="flex items-center gap-2">
+                    <div className="relative flex-1">
+                      <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-500" />
+                      <input 
+                        type="text"
+                        placeholder="Search shops..."
+                        value={paySearch}
+                        onChange={e => setPaySearch(e.target.value)}
+                        className="w-full pl-8 pr-3 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-200 placeholder-slate-500"
+                      />
+                    </div>
+                    <button
+                      onClick={() => setPayOnlyDue(!payOnlyDue)}
+                      className={`px-2.5 py-1.5 rounded-xl text-[11px] font-bold whitespace-nowrap border transition ${
+                        payOnlyDue ? 'bg-rose-500/20 text-rose-400 border-rose-500/40' : 'bg-slate-950 text-slate-400 border-slate-800'
+                      }`}
+                    >
+                      {payOnlyDue ? 'Only Due' : 'All Shops'}
+                    </button>
+                  </div>
+                </div>
+
+                {paySuccessMsg && (
+                  <div className="p-3 rounded-xl bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-xs font-semibold flex items-center gap-2 animate-fade-in">
+                    <CheckCircle2 size={16} />
+                    {paySuccessMsg}
+                  </div>
+                )}
+
+                {/* Shops Batch List */}
+                <div className="space-y-2 pb-16">
+                  {payBookerShops.length === 0 ? (
+                    <div className="text-center py-12 text-slate-500 text-xs">
+                      No shops found matching filter for this booker.
+                    </div>
+                  ) : (
+                    payBookerShops.map(shop => {
+                      const val = payAmounts[shop.id] || '';
+                      const hasVal = (parseFloat(val) || 0) > 0;
+
+                      return (
+                        <div 
+                          key={shop.id}
+                          className={`p-3 rounded-xl border transition flex items-center justify-between gap-2 ${
+                            hasVal 
+                              ? 'bg-rose-950/30 border-rose-500/50 shadow-md' 
+                              : 'bg-slate-900/90 border-slate-800/80'
+                          }`}
+                        >
+                          <div className="flex-1 min-w-0 pr-2">
+                            <h4 className="text-xs font-bold text-slate-100 truncate">{shop.name}</h4>
+                            <div className="flex items-center gap-2 mt-0.5 text-[10px] text-slate-400">
+                              <span>Due: <strong className="text-rose-400">{formatCurrency(shop.outstanding)}</strong></span>
+                              {shop.billsCount > 0 && <span>• {shop.billsCount} bills</span>}
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-1.5">
+                            {/* Auto-fill full balance button */}
+                            {shop.outstanding > 0 && (
+                              <button
+                                type="button"
+                                onClick={() => setPayAmounts({ ...payAmounts, [shop.id]: String(shop.outstanding) })}
+                                className="px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-[10px] font-bold text-slate-300 active:scale-95"
+                                title="Full Due"
+                              >
+                                Full
+                              </button>
+                            )}
+
+                            {/* Amount input */}
+                            <input 
+                              type="number"
+                              inputMode="decimal"
+                              placeholder="0.00"
+                              value={val}
+                              onChange={e => setPayAmounts({ ...payAmounts, [shop.id]: e.target.value })}
+                              className={`w-28 p-2 rounded-xl text-right text-xs font-extrabold outline-none border transition ${
+                                hasVal
+                                  ? 'bg-rose-500/20 border-rose-500 text-rose-300 focus:ring-2 focus:ring-rose-500/40'
+                                  : 'bg-slate-950 border-slate-800 text-white focus:border-rose-500'
+                              }`}
+                            />
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+
+                {/* Sticky Batch Save Bar */}
+                {payBatchCount > 0 && (
+                  <div className="fixed bottom-16 left-0 right-0 max-w-lg mx-auto p-3 bg-slate-900/95 backdrop-blur-md border-t border-slate-800 flex items-center justify-between z-30 shadow-2xl">
+                    <div>
+                      <span className="text-[10px] text-slate-400 uppercase font-bold block">{payBatchCount} Shops Selected</span>
+                      <span className="text-base font-black text-rose-400">{formatCurrency(payBatchTotal)}</span>
+                    </div>
+
+                    <button
+                      onClick={handleBatchPaySubmit}
+                      disabled={paySubmitting}
+                      className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-rose-500 to-indigo-600 hover:from-rose-600 hover:to-indigo-700 active:scale-95 text-white font-bold text-xs shadow-lg shadow-rose-500/30 flex items-center gap-2"
+                    >
+                      {paySubmitting ? (
+                        <>
+                          <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                          Saving Batch...
+                        </>
+                      ) : (
+                        <>
+                          <Save size={15} />
+                          Save Batch ({payBatchCount})
+                        </>
+                      )}
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ============================================================== */}
+            {/* TAB: QUICK BILLS (BATCH INVOICE ENTRY - DESKTOP PARITY)        */}
+            {/* ============================================================== */}
+            {activeTab === 'quickbills' && (
+              <div className="space-y-3">
+                {/* Header Card */}
+                <div className="p-3.5 bg-slate-900/90 border border-slate-800 rounded-2xl shadow-sm">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-2">
+                      <div className="w-8 h-8 rounded-lg bg-indigo-500/20 text-indigo-400 flex items-center justify-center font-bold">
+                        <Receipt size={17} />
+                      </div>
+                      <div>
+                        <h2 className="text-sm font-bold text-slate-100">Quick Bills (Batch)</h2>
+                        <p className="text-[10px] text-slate-400">Generate multiple invoices for booker</p>
+                      </div>
+                    </div>
+                    {billBatchCount > 0 && (
+                      <button
+                        onClick={() => setBillAmounts({})}
+                        className="text-[11px] text-indigo-400 hover:text-indigo-300 font-semibold"
+                      >
+                        Clear All
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Booker & Bill Date */}
+                  <div className="grid grid-cols-2 gap-2 mb-2">
+                    <div>
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">Booker</label>
+                      <select 
+                        value={billBookerId}
+                        onChange={e => {
+                          setBillBookerId(e.target.value);
+                          setBillAmounts({});
+                        }}
+                        className="w-full p-2 rounded-xl bg-slate-950 border border-slate-800 text-xs font-bold text-slate-200"
+                      >
+                        {bookers.map(b => (
+                          <option key={b.id} value={b.id}>{b.name}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">Bill Date</label>
+                      <input 
+                        type="date"
+                        value={billDate}
+                        onChange={e => setBillDate(e.target.value)}
+                        className="w-full p-2 rounded-xl bg-slate-950 border border-slate-800 text-xs font-bold text-slate-200"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Search input */}
+                  <div className="relative">
+                    <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-500" />
+                    <input 
+                      type="text"
+                      placeholder="Filter shops to invoice..."
+                      value={billSearch}
+                      onChange={e => setBillSearch(e.target.value)}
+                      className="w-full pl-8 pr-3 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-200 placeholder-slate-500"
+                    />
+                  </div>
+                </div>
+
+                {billSuccessMsg && (
+                  <div className="p-3 rounded-xl bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-xs font-semibold flex items-center gap-2 animate-fade-in">
+                    <CheckCircle2 size={16} />
+                    {billSuccessMsg}
+                  </div>
+                )}
+
+                {/* Shops Batch List */}
+                <div className="space-y-2 pb-16">
+                  {billBookerShops.length === 0 ? (
+                    <div className="text-center py-12 text-slate-500 text-xs">
+                      No shops found for this booker.
+                    </div>
+                  ) : (
+                    billBookerShops.map(shop => {
+                      const val = billAmounts[shop.id] || '';
+                      const hasVal = (parseFloat(val) || 0) > 0;
+
+                      return (
+                        <div 
+                          key={shop.id}
+                          className={`p-3 rounded-xl border transition flex items-center justify-between gap-2 ${
+                            hasVal 
+                              ? 'bg-indigo-950/30 border-indigo-500/50 shadow-md' 
+                              : 'bg-slate-900/90 border-slate-800/80'
+                          }`}
+                        >
+                          <div className="flex-1 min-w-0 pr-2">
+                            <h4 className="text-xs font-bold text-slate-100 truncate">{shop.name}</h4>
+                            <div className="flex items-center gap-2 mt-0.5 text-[10px] text-slate-400">
+                              <span>Current Balance: <strong className="text-slate-300">{formatCurrency(shop.outstanding)}</strong></span>
+                            </div>
+                          </div>
+
+                          <div className="w-32">
+                            <input 
+                              type="number"
+                              inputMode="decimal"
+                              placeholder="0.00"
+                              value={val}
+                              onChange={e => setBillAmounts({ ...billAmounts, [shop.id]: e.target.value })}
+                              className={`w-full p-2 rounded-xl text-right text-xs font-extrabold outline-none border transition ${
+                                hasVal
+                                  ? 'bg-indigo-500/20 border-indigo-500 text-indigo-300 focus:ring-2 focus:ring-indigo-500/40'
+                                  : 'bg-slate-950 border-slate-800 text-white focus:border-indigo-500'
+                              }`}
+                            />
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+
+                {/* Sticky Batch Bill Save Bar */}
+                {billBatchCount > 0 && (
+                  <div className="fixed bottom-16 left-0 right-0 max-w-lg mx-auto p-3 bg-slate-900/95 backdrop-blur-md border-t border-slate-800 flex items-center justify-between z-30 shadow-2xl">
+                    <div>
+                      <span className="text-[10px] text-slate-400 uppercase font-bold block">{billBatchCount} Bills To Generate</span>
+                      <span className="text-base font-black text-indigo-400">{formatCurrency(billBatchTotal)}</span>
+                    </div>
+
+                    <button
+                      onClick={handleBatchBillSubmit}
+                      disabled={billSubmitting}
+                      className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-indigo-500 to-rose-600 hover:from-indigo-600 hover:to-rose-700 active:scale-95 text-white font-bold text-xs shadow-lg shadow-indigo-500/30 flex items-center gap-2"
+                    >
+                      {billSubmitting ? (
+                        <>
+                          <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                          Generating Batch...
+                        </>
+                      ) : (
+                        <>
+                          <Save size={15} />
+                          Generate All ({billBatchCount})
+                        </>
+                      )}
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ============================================================== */}
+            {/* TAB: SHOPS & LEDGERS                                           */}
+            {/* ============================================================== */}
             {activeTab === 'shops' && (
               <div className="space-y-3">
                 {/* Search & Booker Filter */}
@@ -627,215 +1024,9 @@ export default function App() {
               </div>
             )}
 
-            {/* TAB: QUICK PAY */}
-            {activeTab === 'quickpay' && (
-              <div className="space-y-4">
-                <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4 shadow-xl">
-                  <div className="flex items-center gap-2 mb-3">
-                    <Zap size={20} className="text-rose-400" />
-                    <div>
-                      <h2 className="text-base font-bold text-slate-100">Record Quick Payment</h2>
-                      <p className="text-[11px] text-slate-400">Auto-distributes across shop bills FIFO</p>
-                    </div>
-                  </div>
-
-                  {paySuccessMsg && (
-                    <div className="mb-4 p-3 rounded-xl bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-xs font-semibold flex items-center gap-2 animate-fade-in">
-                      <CheckCircle2 size={16} />
-                      {paySuccessMsg}
-                    </div>
-                  )}
-
-                  <form onSubmit={handleQuickPaySubmit} className="space-y-3.5">
-                    {/* Booker Selector */}
-                    <div>
-                      <label className="text-xs font-semibold text-slate-300 block mb-1">Select Booker</label>
-                      <select 
-                        value={payBookerId}
-                        onChange={e => {
-                          setPayBookerId(e.target.value);
-                          setPayShopId('');
-                        }}
-                        className="w-full p-2.5 rounded-xl bg-slate-950 border border-slate-800 text-sm text-slate-200 focus:outline-none focus:border-rose-500 transition"
-                      >
-                        <option value="">-- All Bookers --</option>
-                        {bookers.map(b => (
-                          <option key={b.id} value={b.id}>{b.name}</option>
-                        ))}
-                      </select>
-                    </div>
-
-                    {/* Shop Selector */}
-                    <div>
-                      <label className="text-xs font-semibold text-slate-300 block mb-1">Select Shop *</label>
-                      <select 
-                        value={payShopId}
-                        onChange={e => setPayShopId(e.target.value)}
-                        required
-                        className="w-full p-2.5 rounded-xl bg-slate-950 border border-slate-800 text-sm text-slate-200 focus:outline-none focus:border-rose-500 transition"
-                      >
-                        <option value="">-- Choose Shop --</option>
-                        {shopsWithBalance
-                          .filter(s => !payBookerId || s.booker_id === payBookerId)
-                          .map(s => (
-                            <option key={s.id} value={s.id}>
-                              {s.name} ({s.bookerName}) - Bal: {formatCurrency(s.outstanding)}
-                            </option>
-                          ))}
-                      </select>
-                    </div>
-
-                    {/* Payment Amount */}
-                    <div>
-                      <label className="text-xs font-semibold text-slate-300 block mb-1">Payment Amount (Rs.) *</label>
-                      <input 
-                        type="number"
-                        step="any"
-                        placeholder="0.00"
-                        value={payAmount}
-                        onChange={e => setPayAmount(e.target.value)}
-                        required
-                        className="w-full p-3 rounded-xl bg-slate-950 border border-slate-800 text-lg font-bold text-white focus:outline-none focus:border-rose-500 transition"
-                      />
-                    </div>
-
-                    {/* Payment Mode */}
-                    <div>
-                      <label className="text-xs font-semibold text-slate-300 block mb-1">Payment Mode</label>
-                      <div className="grid grid-cols-3 gap-2">
-                        {['Cash', 'Return', 'Credit Note', 'Online Transfer', 'Cheque'].map(mode => (
-                          <button
-                            type="button"
-                            key={mode}
-                            onClick={() => setPayMode(mode)}
-                            className={`p-2 rounded-xl text-xs font-bold transition ${
-                              payMode === mode
-                                ? mode === 'Cash' 
-                                  ? 'bg-emerald-600 text-white' 
-                                  : mode === 'Return' || mode === 'Credit Note'
-                                  ? 'bg-amber-600 text-white'
-                                  : 'bg-indigo-600 text-white'
-                                : 'bg-slate-950 text-slate-400 border border-slate-800'
-                            }`}
-                          >
-                            {mode}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-
-                    {/* Payment Date & Notes */}
-                    <div className="grid grid-cols-2 gap-2">
-                      <div>
-                        <label className="text-xs font-semibold text-slate-300 block mb-1">Date</label>
-                        <input 
-                          type="date"
-                          value={payDate}
-                          onChange={e => setPayDate(e.target.value)}
-                          className="w-full p-2.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-200 focus:outline-none focus:border-rose-500"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-xs font-semibold text-slate-300 block mb-1">Notes / Ref</label>
-                        <input 
-                          type="text"
-                          placeholder="Reference"
-                          value={payNotes}
-                          onChange={e => setPayNotes(e.target.value)}
-                          className="w-full p-2.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-200 focus:outline-none focus:border-rose-500"
-                        />
-                      </div>
-                    </div>
-
-                    {/* Submit Button */}
-                    <button
-                      type="submit"
-                      disabled={paySubmitting}
-                      className="w-full mt-2 py-3.5 rounded-xl bg-gradient-to-r from-rose-500 to-indigo-600 hover:from-rose-600 hover:to-indigo-700 active:scale-95 text-white font-bold text-sm shadow-lg shadow-rose-500/25 transition flex items-center justify-center gap-2"
-                    >
-                      {paySubmitting ? (
-                        <>
-                          <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                          Syncing to Cloud...
-                        </>
-                      ) : (
-                        <>
-                          <Zap size={16} />
-                          Confirm & Save Payment
-                        </>
-                      )}
-                    </button>
-                  </form>
-                </div>
-              </div>
-            )}
-
-            {/* TAB: BILLS */}
-            {activeTab === 'bills' && (
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-sm font-bold text-slate-200">Mayfair Bills ({bills.length.toLocaleString()})</h3>
-                  <button 
-                    onClick={() => setShowAddBillModal(true)}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold active:scale-95 transition"
-                  >
-                    <Plus size={14} />
-                    New Bill
-                  </button>
-                </div>
-
-                <div className="space-y-2">
-                  {bills.slice(0, 60).map(bill => {
-                    const bPayments = payments.filter(p => p.bill_id === bill.id);
-                    const state = computeBillState(bill, bPayments);
-                    const shop = shops.find(s => s.id === bill.shop_id);
-                    const booker = bookers.find(b => b.id === bill.booker_id);
-
-                    return (
-                      <div 
-                        key={bill.id}
-                        className="p-3.5 rounded-xl bg-slate-900 border border-slate-800 shadow-sm space-y-2"
-                      >
-                        <div className="flex justify-between items-start">
-                          <div>
-                            <span className="text-sm font-bold text-slate-100">{shop?.name || 'Shop'}</span>
-                            <div className="text-[11px] text-slate-400 mt-0.5">
-                              {booker?.name} • Date: {bill.bill_date}
-                            </div>
-                          </div>
-                          <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${
-                            state.status === 'paid' 
-                              ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
-                              : state.status === 'partial'
-                              ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
-                              : 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
-                          }`}>
-                            {state.status}
-                          </span>
-                        </div>
-
-                        <div className="grid grid-cols-3 gap-1 pt-1 border-t border-slate-800/80 text-[11px]">
-                          <div>
-                            <span className="text-slate-500 block">Total</span>
-                            <span className="font-bold text-slate-200">{formatCurrency(state.total)}</span>
-                          </div>
-                          <div>
-                            <span className="text-slate-500 block">Paid</span>
-                            <span className="font-bold text-emerald-400">{formatCurrency(state.paid)}</span>
-                          </div>
-                          <div className="text-right">
-                            <span className="text-slate-500 block">Remaining</span>
-                            <span className="font-bold text-rose-400">{formatCurrency(state.outstanding)}</span>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            {/* TAB: AUDIT */}
+            {/* ============================================================== */}
+            {/* TAB: AUDIT & REPORTS                                           */}
+            {/* ============================================================== */}
             {activeTab === 'audit' && (
               <div className="space-y-4">
                 <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4 shadow-lg">
@@ -968,101 +1159,16 @@ export default function App() {
             <div className="p-4 border-t border-slate-800">
               <button
                 onClick={() => {
-                  setPayShopId(selectedShop.id);
                   setPayBookerId(selectedShop.booker_id);
+                  setPayAmounts({ [selectedShop.id]: String(selectedShop.outstanding) });
                   setSelectedShop(null);
                   setActiveTab('quickpay');
                 }}
                 className="w-full py-3 rounded-xl bg-gradient-to-r from-rose-500 to-indigo-600 text-white font-bold text-sm active:scale-95 transition"
               >
-                Pay Now
+                Pay in Quick Payments
               </button>
             </div>
-          </div>
-        </div>
-      )}
-
-      {/* ADD BILL MODAL */}
-      {showAddBillModal && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
-          <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-t-3xl sm:rounded-2xl flex flex-col shadow-2xl p-4 space-y-3 animate-slide-up">
-            <div className="flex justify-between items-center border-b border-slate-800 pb-2">
-              <h3 className="font-bold text-base text-white">Create New Bill</h3>
-              <button 
-                onClick={() => setShowAddBillModal(false)}
-                className="p-1.5 rounded-full bg-slate-800 text-slate-400"
-              >
-                <X size={18} />
-              </button>
-            </div>
-
-            <form onSubmit={handleAddBillSubmit} className="space-y-3">
-              <div>
-                <label className="text-xs font-semibold text-slate-300 block mb-1">Select Booker *</label>
-                <select 
-                  value={newBillBookerId}
-                  onChange={e => {
-                    setNewBillBookerId(e.target.value);
-                    setNewBillShopId('');
-                  }}
-                  required
-                  className="w-full p-2.5 rounded-xl bg-slate-950 border border-slate-800 text-sm text-slate-200"
-                >
-                  <option value="">-- Choose Booker --</option>
-                  {bookers.map(b => (
-                    <option key={b.id} value={b.id}>{b.name}</option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="text-xs font-semibold text-slate-300 block mb-1">Select Shop *</label>
-                <select 
-                  value={newBillShopId}
-                  onChange={e => setNewBillShopId(e.target.value)}
-                  required
-                  className="w-full p-2.5 rounded-xl bg-slate-950 border border-slate-800 text-sm text-slate-200"
-                >
-                  <option value="">-- Choose Shop --</option>
-                  {shops
-                    .filter(s => !newBillBookerId || s.booker_id === newBillBookerId)
-                    .map(s => (
-                      <option key={s.id} value={s.id}>{s.name}</option>
-                    ))}
-                </select>
-              </div>
-
-              <div>
-                <label className="text-xs font-semibold text-slate-300 block mb-1">Bill Amount (Rs.) *</label>
-                <input 
-                  type="number"
-                  step="any"
-                  placeholder="0.00"
-                  value={newBillAmount}
-                  onChange={e => setNewBillAmount(e.target.value)}
-                  required
-                  className="w-full p-3 rounded-xl bg-slate-950 border border-slate-800 text-lg font-bold text-white"
-                />
-              </div>
-
-              <div>
-                <label className="text-xs font-semibold text-slate-300 block mb-1">Bill Date</label>
-                <input 
-                  type="date"
-                  value={newBillDate}
-                  onChange={e => setNewBillDate(e.target.value)}
-                  className="w-full p-2.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-200"
-                />
-              </div>
-
-              <button
-                type="submit"
-                disabled={billSubmitting}
-                className="w-full py-3.5 rounded-xl bg-gradient-to-r from-indigo-500 to-rose-600 font-bold text-white text-sm"
-              >
-                {billSubmitting ? 'Saving to Cloud...' : 'Create & Sync Bill'}
-              </button>
-            </form>
           </div>
         </div>
       )}
@@ -1081,16 +1187,6 @@ export default function App() {
           </button>
 
           <button 
-            onClick={() => setActiveTab('shops')}
-            className={`flex flex-col items-center justify-center py-1 transition ${
-              activeTab === 'shops' ? 'text-rose-500 font-bold' : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <Store size={20} />
-            <span className="text-[10px] mt-1 font-semibold">Shops</span>
-          </button>
-
-          <button 
             onClick={() => setActiveTab('quickpay')}
             className={`flex flex-col items-center justify-center py-1 transition ${
               activeTab === 'quickpay' ? 'text-rose-500 font-bold' : 'text-slate-400 hover:text-slate-200'
@@ -1103,13 +1199,23 @@ export default function App() {
           </button>
 
           <button 
-            onClick={() => setActiveTab('bills')}
+            onClick={() => setActiveTab('quickbills')}
             className={`flex flex-col items-center justify-center py-1 transition ${
-              activeTab === 'bills' ? 'text-rose-500 font-bold' : 'text-slate-400 hover:text-slate-200'
+              activeTab === 'quickbills' ? 'text-rose-500 font-bold' : 'text-slate-400 hover:text-slate-200'
             }`}
           >
             <Receipt size={20} />
-            <span className="text-[10px] mt-1 font-semibold">Bills</span>
+            <span className="text-[10px] mt-1 font-semibold">Quick Bills</span>
+          </button>
+
+          <button 
+            onClick={() => setActiveTab('shops')}
+            className={`flex flex-col items-center justify-center py-1 transition ${
+              activeTab === 'shops' ? 'text-rose-500 font-bold' : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <Store size={20} />
+            <span className="text-[10px] mt-1 font-semibold">Shops</span>
           </button>
 
           <button 
