@@ -10,21 +10,26 @@ import {
   Plus, 
   CheckCircle2, 
   ChevronRight, 
-  X,
-  Share2,
-  TrendingUp,
-  AlertTriangle,
-  Calendar,
-  Building2,
-  Check,
-  Save,
-  ArrowRight,
-  Filter,
-  DollarSign,
-  ChevronDown,
-  Phone,
-  Clock,
-  Layers
+  X, 
+  Share2, 
+  TrendingUp, 
+  AlertTriangle, 
+  Calendar, 
+  Building2, 
+  Check, 
+  Save, 
+  ArrowRight, 
+  Filter, 
+  DollarSign, 
+  ChevronDown, 
+  Phone, 
+  Clock, 
+  Layers,
+  Lock,
+  Unlock,
+  LogOut,
+  KeyRound,
+  Delete
 } from 'lucide-react';
 import { supabase } from './supabase';
 import { 
@@ -39,9 +44,25 @@ import {
 } from './utils/calculations';
 import { uid, today, now } from './utils/id';
 
-type Tab = 'dashboard' | 'quickpay' | 'quickbills' | 'shops' | 'audit';
+type Tab = 'dashboard' | 'quickbills' | 'quickpay' | 'shops' | 'audit';
+
+// Default allowed security access codes
+const DEFAULT_CODES = ['1250', '1234', '7860', '125'];
 
 export default function App() {
+  // ==================== AUTHENTICATION STATE ====================
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
+    return localStorage.getItem('mayfair_auth_logged_in') === 'true';
+  });
+  const [pinInput, setPinInput] = useState('');
+  const [pinError, setPinError] = useState(false);
+  const [customPin, setCustomPin] = useState<string>(() => {
+    return localStorage.getItem('mayfair_custom_pin') || '1250';
+  });
+  const [newPinInput, setNewPinInput] = useState('');
+  const [showChangePinModal, setShowChangePinModal] = useState(false);
+
+  // Core App Navigation
   const [activeTab, setActiveTab] = useState<Tab>('dashboard');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -88,6 +109,57 @@ export default function App() {
   const [billSubmitting, setBillSubmitting] = useState(false);
   const [billSuccessMsg, setBillSuccessMsg] = useState('');
 
+  // Handle PIN verification
+  const handlePinSubmit = (enteredPin: string) => {
+    const valid = DEFAULT_CODES.includes(enteredPin) || enteredPin === customPin;
+    if (valid) {
+      setIsAuthenticated(true);
+      localStorage.setItem('mayfair_auth_logged_in', 'true');
+      setPinInput('');
+      setPinError(false);
+    } else {
+      setPinError(true);
+      setTimeout(() => {
+        setPinInput('');
+        setPinError(false);
+      }, 900);
+    }
+  };
+
+  const handleKeyPress = (num: string) => {
+    if (pinInput.length < 6) {
+      const updated = pinInput + num;
+      setPinInput(updated);
+      if (updated.length >= 4) {
+        handlePinSubmit(updated);
+      }
+    }
+  };
+
+  const handleDeletePin = () => {
+    setPinInput(prev => prev.slice(0, -1));
+    setPinError(false);
+  };
+
+  const handleLogout = () => {
+    setIsAuthenticated(false);
+    localStorage.removeItem('mayfair_auth_logged_in');
+    setPinInput('');
+  };
+
+  const handleSaveNewPin = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (newPinInput.length < 4) {
+      alert('Security code must be at least 4 digits.');
+      return;
+    }
+    setCustomPin(newPinInput);
+    localStorage.setItem('mayfair_custom_pin', newPinInput);
+    alert(`✓ Security code updated successfully! Your new code is: ${newPinInput}`);
+    setShowChangePinModal(false);
+    setNewPinInput('');
+  };
+
   // Fetch all live data from Supabase
   const loadData = useCallback(async () => {
     try {
@@ -125,10 +197,12 @@ export default function App() {
   }, [payBookerId, billBookerId]);
 
   useEffect(() => {
-    loadData();
-    const interval = setInterval(loadData, 25000);
-    return () => clearInterval(interval);
-  }, [loadData]);
+    if (isAuthenticated) {
+      loadData();
+      const interval = setInterval(loadData, 25000);
+      return () => clearInterval(interval);
+    }
+  }, [isAuthenticated, loadData]);
 
   // Derived stats with 100% PARITY to Desktop DashboardView.tsx
   const stats = useMemo(() => {
@@ -299,7 +373,7 @@ export default function App() {
     }).filter(b => b.outstanding > 0);
   }, [shopBillsMap, billPaymentsMap]);
 
-  // Submit Batch Payments (Handles BOTH Specific Bill Allocation and FIFO)
+  // Submit Batch Payments
   const handleBatchPaySubmit = async () => {
     if (payBatchCount === 0 || payBatchTotal <= 0) {
       alert('Please enter payment amounts for at least one shop.');
@@ -350,7 +424,6 @@ export default function App() {
             remaining -= allocation;
           }
 
-          // Excess advance to latest bill
           if (remaining > 0 && shopDueBills.length > 0) {
             allOps.push({
               id: uid('pay'),
@@ -465,6 +538,97 @@ export default function App() {
     window.open(`https://api.whatsapp.com/send?text=${encodeURIComponent(text)}`, '_blank');
   };
 
+  // =========================================================================
+  // IF NOT AUTHENTICATED: RENDER SLEEK MOBILE SECURITY LOCK SCREEN
+  // =========================================================================
+  if (!isAuthenticated) {
+    return (
+      <div className="flex flex-col min-h-screen bg-slate-950 text-slate-100 max-w-lg mx-auto p-6 justify-between select-none relative overflow-hidden">
+        {/* Ambient Glow */}
+        <div className="absolute top-1/4 left-1/2 -translate-x-1/2 w-64 h-64 bg-rose-500/10 rounded-full blur-3xl pointer-events-none"></div>
+
+        {/* Top Branding */}
+        <div className="text-center pt-8 space-y-3 z-10">
+          <div className="w-16 h-16 mx-auto rounded-3xl bg-gradient-to-tr from-amber-500 via-rose-500 to-indigo-600 flex items-center justify-center shadow-xl shadow-rose-500/25">
+            <Lock size={30} className="text-white" />
+          </div>
+          <div>
+            <h1 className="text-2xl font-black tracking-tight text-white">Mayfair Manager</h1>
+            <p className="text-xs text-slate-400 font-medium mt-0.5">Enter Security Code to Unlock</p>
+          </div>
+        </div>
+
+        {/* PIN Indicators Display */}
+        <div className="my-auto py-6 z-10 flex flex-col items-center">
+          <div className={`flex items-center gap-3.5 my-4 transition-transform ${pinError ? 'animate-bounce' : ''}`}>
+            {[0, 1, 2, 3].map(idx => (
+              <div 
+                key={idx}
+                className={`w-4 h-4 rounded-full border-2 transition-all duration-200 ${
+                  pinError 
+                    ? 'border-rose-500 bg-rose-500 shadow-md shadow-rose-500/50' 
+                    : idx < pinInput.length 
+                    ? 'border-rose-400 bg-rose-500 shadow-md shadow-rose-500/40 scale-110' 
+                    : 'border-slate-700 bg-slate-900/80'
+                }`}
+              />
+            ))}
+          </div>
+
+          {pinError ? (
+            <span className="text-xs font-bold text-rose-400 animate-pulse">Incorrect code. Try again.</span>
+          ) : (
+            <span className="text-[11px] text-slate-500">Authorized Personnel Only</span>
+          )}
+        </div>
+
+        {/* Numeric Keypad (Touch friendly) */}
+        <div className="w-full max-w-xs mx-auto pb-4 z-10 space-y-3">
+          <div className="grid grid-cols-3 gap-3">
+            {['1', '2', '3', '4', '5', '6', '7', '8', '9'].map(num => (
+              <button
+                key={num}
+                type="button"
+                onClick={() => handleKeyPress(num)}
+                className="h-16 rounded-2xl bg-slate-900/80 border border-slate-800 hover:bg-slate-800/80 active:scale-95 text-xl font-bold text-slate-100 flex items-center justify-center shadow-sm transition"
+              >
+                {num}
+              </button>
+            ))}
+            <button
+              type="button"
+              onClick={() => setPinInput('')}
+              className="h-16 rounded-2xl bg-slate-900/50 border border-slate-800 text-xs font-bold text-slate-400 hover:text-white flex items-center justify-center active:scale-95 transition"
+            >
+              Clear
+            </button>
+            <button
+              type="button"
+              onClick={() => handleKeyPress('0')}
+              className="h-16 rounded-2xl bg-slate-900/80 border border-slate-800 hover:bg-slate-800/80 active:scale-95 text-xl font-bold text-slate-100 flex items-center justify-center shadow-sm transition"
+            >
+              0
+            </button>
+            <button
+              type="button"
+              onClick={handleDeletePin}
+              className="h-16 rounded-2xl bg-slate-900/50 border border-slate-800 text-slate-300 hover:text-white flex items-center justify-center active:scale-95 transition"
+            >
+              <Delete size={20} />
+            </button>
+          </div>
+
+          <div className="pt-2 text-center">
+            <span className="text-[11px] text-slate-600 block">Default Code: <strong className="text-slate-400">1250</strong></span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // =========================================================================
+  // AUTHENTICATED APP SCREEN
+  // =========================================================================
   return (
     <div className="flex flex-col min-h-screen bg-slate-950 text-slate-100 max-w-lg mx-auto shadow-2xl relative pb-24">
       {/* Top Header */}
@@ -482,14 +646,24 @@ export default function App() {
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5">
+          {/* Refresh Button */}
           <button 
             onClick={loadData}
             disabled={refreshing}
-            className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 active:scale-95 transition text-slate-300"
+            className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 active:scale-95 transition text-slate-300"
             title="Refresh Live Data"
           >
-            <RefreshCw size={17} className={refreshing ? 'animate-spin text-rose-400' : ''} />
+            <RefreshCw size={16} className={refreshing ? 'animate-spin text-rose-400' : ''} />
+          </button>
+
+          {/* Logout Button */}
+          <button 
+            onClick={handleLogout}
+            className="p-2 rounded-xl bg-slate-800/80 hover:bg-rose-950/40 border border-slate-700/60 hover:border-rose-500/40 text-slate-300 hover:text-rose-400 active:scale-95 transition flex items-center gap-1"
+            title="Logout and Lock App"
+          >
+            <LogOut size={16} />
           </button>
         </div>
       </header>
@@ -634,7 +808,160 @@ export default function App() {
             )}
 
             {/* ============================================================== */}
-            {/* TAB: QUICK PAY (BATCH RECOVERY WITH BILL DROPDOWNS)            */}
+            {/* TAB: QUICK BILLS (POSITION 2 - BATCH INVOICE ENTRY)            */}
+            {/* ============================================================== */}
+            {activeTab === 'quickbills' && (
+              <div className="space-y-3">
+                {/* Header Card */}
+                <div className="p-3.5 bg-slate-900/90 border border-slate-800 rounded-2xl shadow-sm">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-2">
+                      <div className="w-8 h-8 rounded-lg bg-indigo-500/20 text-indigo-400 flex items-center justify-center font-bold">
+                        <Receipt size={17} />
+                      </div>
+                      <div>
+                        <h2 className="text-sm font-bold text-slate-100">Quick Bills (Batch)</h2>
+                        <p className="text-[10px] text-slate-400">Generate multiple invoices for booker</p>
+                      </div>
+                    </div>
+                    {billBatchCount > 0 && (
+                      <button
+                        onClick={() => setBillAmounts({})}
+                        className="text-[11px] text-indigo-400 hover:text-indigo-300 font-semibold"
+                      >
+                        Clear All
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Booker & Bill Date */}
+                  <div className="grid grid-cols-2 gap-2 mb-2">
+                    <div>
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">Booker</label>
+                      <select 
+                        value={billBookerId}
+                        onChange={e => {
+                          setBillBookerId(e.target.value);
+                          setBillAmounts({});
+                        }}
+                        className="w-full p-2 rounded-xl bg-slate-950 border border-slate-800 text-xs font-bold text-slate-200"
+                      >
+                        {bookers.map(b => (
+                          <option key={b.id} value={b.id}>{b.name}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">Bill Date</label>
+                      <input 
+                        type="date"
+                        value={billDate}
+                        onChange={e => setBillDate(e.target.value)}
+                        className="w-full p-2 rounded-xl bg-slate-950 border border-slate-800 text-xs font-bold text-slate-200"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Search input */}
+                  <div className="relative">
+                    <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-500" />
+                    <input 
+                      type="text"
+                      placeholder="Filter shops to invoice..."
+                      value={billSearch}
+                      onChange={e => setBillSearch(e.target.value)}
+                      className="w-full pl-8 pr-3 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-200 placeholder-slate-500"
+                    />
+                  </div>
+                </div>
+
+                {billSuccessMsg && (
+                  <div className="p-3 rounded-xl bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-xs font-semibold flex items-center gap-2 animate-fade-in">
+                    <CheckCircle2 size={16} />
+                    {billSuccessMsg}
+                  </div>
+                )}
+
+                {/* Shops Batch List */}
+                <div className="space-y-2 pb-20">
+                  {billBookerShops.length === 0 ? (
+                    <div className="text-center py-12 text-slate-500 text-xs">
+                      No shops found for this booker.
+                    </div>
+                  ) : (
+                    billBookerShops.map(shop => {
+                      const val = billAmounts[shop.id] || '';
+                      const hasVal = (parseFloat(val) || 0) > 0;
+
+                      return (
+                        <div 
+                          key={shop.id}
+                          className={`p-3 rounded-xl border transition flex items-center justify-between gap-2 ${
+                            hasVal 
+                              ? 'bg-indigo-950/30 border-indigo-500/50 shadow-md' 
+                              : 'bg-slate-900/90 border-slate-800/80'
+                          }`}
+                        >
+                          <div className="flex-1 min-w-0 pr-2">
+                            <h4 className="text-xs font-bold text-slate-100 truncate">{shop.name}</h4>
+                            <div className="flex items-center gap-2 mt-0.5 text-[10px] text-slate-400">
+                              <span>Current Balance: <strong className="text-slate-300">{formatCurrency(shop.outstanding)}</strong></span>
+                            </div>
+                          </div>
+
+                          <div className="w-32">
+                            <input 
+                              type="number"
+                              inputMode="decimal"
+                              placeholder="0.00"
+                              value={val}
+                              onChange={e => setBillAmounts({ ...billAmounts, [shop.id]: e.target.value })}
+                              className={`w-full p-2 rounded-xl text-right text-xs font-extrabold outline-none border transition ${
+                                hasVal
+                                  ? 'bg-indigo-500/20 border-indigo-500 text-indigo-300 focus:ring-2 focus:ring-indigo-500/40'
+                                  : 'bg-slate-950 border-slate-800 text-white focus:border-indigo-500'
+                              }`}
+                            />
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+
+                {/* Sticky Batch Bill Save Bar */}
+                {billBatchCount > 0 && (
+                  <div className="fixed bottom-16 left-0 right-0 max-w-lg mx-auto p-3 bg-slate-900/95 backdrop-blur-md border-t border-slate-800 flex items-center justify-between z-30 shadow-2xl">
+                    <div>
+                      <span className="text-[10px] text-slate-400 uppercase font-bold block">{billBatchCount} Bills To Generate</span>
+                      <span className="text-base font-black text-indigo-400">{formatCurrency(billBatchTotal)}</span>
+                    </div>
+
+                    <button
+                      onClick={handleBatchBillSubmit}
+                      disabled={billSubmitting}
+                      className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-indigo-500 to-rose-600 hover:from-indigo-600 hover:to-rose-700 active:scale-95 text-white font-bold text-xs shadow-lg shadow-indigo-500/30 flex items-center gap-2"
+                    >
+                      {billSubmitting ? (
+                        <>
+                          <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                          Generating Batch...
+                        </>
+                      ) : (
+                        <>
+                          <Save size={15} />
+                          Generate All ({billBatchCount})
+                        </>
+                      )}
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ============================================================== */}
+            {/* TAB: QUICK PAY (POSITION 3 - EXACT CENTER FLOATING TAB)        */}
             {/* ============================================================== */}
             {activeTab === 'quickpay' && (
               <div className="space-y-3">
@@ -831,7 +1158,6 @@ export default function App() {
                                   onChange={e => {
                                     const newBillId = e.target.value;
                                     setPaySelectedBills({ ...paySelectedBills, [shop.id]: newBillId });
-                                    // If user changes bill and already entered amount, they can adjust or keep
                                   }}
                                   className={`w-full p-2 pr-7 rounded-xl text-[11px] font-medium appearance-none border transition outline-none ${
                                     selectedBillId !== 'FIFO'
@@ -887,160 +1213,7 @@ export default function App() {
             )}
 
             {/* ============================================================== */}
-            {/* TAB: QUICK BILLS (BATCH INVOICE ENTRY)                         */}
-            {/* ============================================================== */}
-            {activeTab === 'quickbills' && (
-              <div className="space-y-3">
-                {/* Header Card */}
-                <div className="p-3.5 bg-slate-900/90 border border-slate-800 rounded-2xl shadow-sm">
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-2">
-                      <div className="w-8 h-8 rounded-lg bg-indigo-500/20 text-indigo-400 flex items-center justify-center font-bold">
-                        <Receipt size={17} />
-                      </div>
-                      <div>
-                        <h2 className="text-sm font-bold text-slate-100">Quick Bills (Batch)</h2>
-                        <p className="text-[10px] text-slate-400">Generate multiple invoices for booker</p>
-                      </div>
-                    </div>
-                    {billBatchCount > 0 && (
-                      <button
-                        onClick={() => setBillAmounts({})}
-                        className="text-[11px] text-indigo-400 hover:text-indigo-300 font-semibold"
-                      >
-                        Clear All
-                      </button>
-                    )}
-                  </div>
-
-                  {/* Booker & Bill Date */}
-                  <div className="grid grid-cols-2 gap-2 mb-2">
-                    <div>
-                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">Booker</label>
-                      <select 
-                        value={billBookerId}
-                        onChange={e => {
-                          setBillBookerId(e.target.value);
-                          setBillAmounts({});
-                        }}
-                        className="w-full p-2 rounded-xl bg-slate-950 border border-slate-800 text-xs font-bold text-slate-200"
-                      >
-                        {bookers.map(b => (
-                          <option key={b.id} value={b.id}>{b.name}</option>
-                        ))}
-                      </select>
-                    </div>
-
-                    <div>
-                      <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">Bill Date</label>
-                      <input 
-                        type="date"
-                        value={billDate}
-                        onChange={e => setBillDate(e.target.value)}
-                        className="w-full p-2 rounded-xl bg-slate-950 border border-slate-800 text-xs font-bold text-slate-200"
-                      />
-                    </div>
-                  </div>
-
-                  {/* Search input */}
-                  <div className="relative">
-                    <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-500" />
-                    <input 
-                      type="text"
-                      placeholder="Filter shops to invoice..."
-                      value={billSearch}
-                      onChange={e => setBillSearch(e.target.value)}
-                      className="w-full pl-8 pr-3 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-200 placeholder-slate-500"
-                    />
-                  </div>
-                </div>
-
-                {billSuccessMsg && (
-                  <div className="p-3 rounded-xl bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-xs font-semibold flex items-center gap-2 animate-fade-in">
-                    <CheckCircle2 size={16} />
-                    {billSuccessMsg}
-                  </div>
-                )}
-
-                {/* Shops Batch List */}
-                <div className="space-y-2 pb-20">
-                  {billBookerShops.length === 0 ? (
-                    <div className="text-center py-12 text-slate-500 text-xs">
-                      No shops found for this booker.
-                    </div>
-                  ) : (
-                    billBookerShops.map(shop => {
-                      const val = billAmounts[shop.id] || '';
-                      const hasVal = (parseFloat(val) || 0) > 0;
-
-                      return (
-                        <div 
-                          key={shop.id}
-                          className={`p-3 rounded-xl border transition flex items-center justify-between gap-2 ${
-                            hasVal 
-                              ? 'bg-indigo-950/30 border-indigo-500/50 shadow-md' 
-                              : 'bg-slate-900/90 border-slate-800/80'
-                          }`}
-                        >
-                          <div className="flex-1 min-w-0 pr-2">
-                            <h4 className="text-xs font-bold text-slate-100 truncate">{shop.name}</h4>
-                            <div className="flex items-center gap-2 mt-0.5 text-[10px] text-slate-400">
-                              <span>Current Balance: <strong className="text-slate-300">{formatCurrency(shop.outstanding)}</strong></span>
-                            </div>
-                          </div>
-
-                          <div className="w-32">
-                            <input 
-                              type="number"
-                              inputMode="decimal"
-                              placeholder="0.00"
-                              value={val}
-                              onChange={e => setBillAmounts({ ...billAmounts, [shop.id]: e.target.value })}
-                              className={`w-full p-2 rounded-xl text-right text-xs font-extrabold outline-none border transition ${
-                                hasVal
-                                  ? 'bg-indigo-500/20 border-indigo-500 text-indigo-300 focus:ring-2 focus:ring-indigo-500/40'
-                                  : 'bg-slate-950 border-slate-800 text-white focus:border-indigo-500'
-                              }`}
-                            />
-                          </div>
-                        </div>
-                      );
-                    })
-                  )}
-                </div>
-
-                {/* Sticky Batch Bill Save Bar */}
-                {billBatchCount > 0 && (
-                  <div className="fixed bottom-16 left-0 right-0 max-w-lg mx-auto p-3 bg-slate-900/95 backdrop-blur-md border-t border-slate-800 flex items-center justify-between z-30 shadow-2xl">
-                    <div>
-                      <span className="text-[10px] text-slate-400 uppercase font-bold block">{billBatchCount} Bills To Generate</span>
-                      <span className="text-base font-black text-indigo-400">{formatCurrency(billBatchTotal)}</span>
-                    </div>
-
-                    <button
-                      onClick={handleBatchBillSubmit}
-                      disabled={billSubmitting}
-                      className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-indigo-500 to-rose-600 hover:from-indigo-600 hover:to-rose-700 active:scale-95 text-white font-bold text-xs shadow-lg shadow-indigo-500/30 flex items-center gap-2"
-                    >
-                      {billSubmitting ? (
-                        <>
-                          <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                          Generating Batch...
-                        </>
-                      ) : (
-                        <>
-                          <Save size={15} />
-                          Generate All ({billBatchCount})
-                        </>
-                      )}
-                    </button>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* ============================================================== */}
-            {/* TAB: SHOPS & LEDGERS (COMPLETELY REDESIGNED & POLISHED)        */}
+            {/* TAB: SHOPS & LEDGERS (POSITION 4)                              */}
             {/* ============================================================== */}
             {activeTab === 'shops' && (
               <div className="space-y-3 pb-20">
@@ -1055,7 +1228,7 @@ export default function App() {
                       value={shopSearch}
                       onChange={e => {
                         setShopSearch(e.target.value);
-                        setShopDisplayLimit(40); // Reset page limit on search
+                        setShopDisplayLimit(40);
                       }}
                       className="w-full pl-9 pr-8 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-rose-500 transition"
                     />
@@ -1176,7 +1349,7 @@ export default function App() {
             )}
 
             {/* ============================================================== */}
-            {/* TAB: AUDIT & REPORTS                                           */}
+            {/* TAB: AUDIT & SECURITY SETTINGS (POSITION 5)                    */}
             {/* ============================================================== */}
             {activeTab === 'audit' && (
               <div className="space-y-4">
@@ -1215,6 +1388,32 @@ export default function App() {
                   </div>
                 </div>
 
+                {/* Security & Access Management Card */}
+                <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-4 shadow-lg space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <KeyRound size={18} className="text-rose-400" />
+                      <h3 className="text-sm font-bold text-slate-100">Security Access Code</h3>
+                    </div>
+                    <button
+                      onClick={() => setShowChangePinModal(true)}
+                      className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-[11px] font-bold text-slate-200 border border-slate-700 active:scale-95 transition"
+                    >
+                      Change Code
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-slate-400">
+                    Current Code: <strong className="text-rose-400 font-mono tracking-widest">{customPin}</strong> (Default fallback: 1250)
+                  </p>
+                  <button
+                    onClick={handleLogout}
+                    className="w-full py-2.5 rounded-xl bg-rose-950/40 border border-rose-500/40 hover:bg-rose-900/40 text-rose-300 font-bold text-xs flex items-center justify-center gap-2 active:scale-95 transition"
+                  >
+                    <LogOut size={15} />
+                    Logout & Lock App
+                  </button>
+                </div>
+
                 {/* Cloud Status Card */}
                 <div className="bg-slate-900/60 border border-slate-800/80 rounded-2xl p-4 text-xs space-y-2">
                   <span className="font-bold text-slate-300 block">Cloud Status & Sync</span>
@@ -1244,6 +1443,48 @@ export default function App() {
           </>
         )}
       </main>
+
+      {/* ============================================================== */}
+      {/* CHANGE PIN MODAL                                               */}
+      {/* ============================================================== */}
+      {showChangePinModal && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-xs bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-2xl space-y-4">
+            <div className="flex justify-between items-center border-b border-slate-800 pb-2">
+              <h3 className="font-bold text-sm text-white">Change Security PIN</h3>
+              <button 
+                onClick={() => setShowChangePinModal(false)}
+                className="p-1 rounded-full bg-slate-800 text-slate-400 hover:text-white"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveNewPin} className="space-y-3">
+              <div>
+                <label className="text-[11px] font-semibold text-slate-300 block mb-1">Enter New Code (4-6 digits)</label>
+                <input 
+                  type="password"
+                  inputMode="numeric"
+                  maxLength={6}
+                  value={newPinInput}
+                  onChange={e => setNewPinInput(e.target.value)}
+                  placeholder="e.g. 5566"
+                  required
+                  className="w-full p-2.5 rounded-xl bg-slate-950 border border-slate-800 text-center font-mono text-lg font-bold text-white tracking-widest outline-none focus:border-rose-500"
+                />
+              </div>
+
+              <button
+                type="submit"
+                className="w-full py-2.5 rounded-xl bg-gradient-to-r from-rose-500 to-indigo-600 font-bold text-white text-xs active:scale-95 transition"
+              >
+                Save New Code
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* ============================================================== */}
       {/* SHOP LEDGER MODAL DRAWER                                       */}
@@ -1362,9 +1603,12 @@ export default function App() {
         </div>
       )}
 
-      {/* Bottom Mobile Navigation Bar */}
+      {/* ============================================================== */}
+      {/* BOTTOM MOBILE NAVIGATION BAR (REORDERED WITH QUICK PAY CENTER) */}
+      {/* ============================================================== */}
       <nav className="fixed bottom-0 left-0 right-0 z-40 bg-slate-900/95 backdrop-blur-md border-t border-slate-800 max-w-lg mx-auto">
-        <div className="grid grid-cols-5 py-2 px-1">
+        <div className="grid grid-cols-5 py-2 px-1 items-end">
+          {/* TAB 1: SUMMARY */}
           <button 
             onClick={() => setActiveTab('dashboard')}
             className={`flex flex-col items-center justify-center py-1 transition ${
@@ -1375,28 +1619,35 @@ export default function App() {
             <span className="text-[10px] mt-1 font-semibold">Summary</span>
           </button>
 
-          <button 
-            onClick={() => setActiveTab('quickpay')}
-            className={`flex flex-col items-center justify-center py-1 transition ${
-              activeTab === 'quickpay' ? 'text-rose-500 font-bold' : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <div className="w-8 h-8 rounded-full bg-gradient-to-r from-rose-500 to-indigo-600 flex items-center justify-center text-white shadow-md shadow-rose-500/30 -mt-3">
-              <Zap size={16} />
-            </div>
-            <span className="text-[10px] mt-0.5 font-semibold">Quick Pay</span>
-          </button>
-
+          {/* TAB 2: QUICK BILLS (SWAPPED TO POSITION 2) */}
           <button 
             onClick={() => setActiveTab('quickbills')}
             className={`flex flex-col items-center justify-center py-1 transition ${
-              activeTab === 'quickbills' ? 'text-rose-500 font-bold' : 'text-slate-400 hover:text-slate-200'
+              activeTab === 'quickbills' ? 'text-indigo-400 font-bold' : 'text-slate-400 hover:text-slate-200'
             }`}
           >
             <Receipt size={20} />
             <span className="text-[10px] mt-1 font-semibold">Quick Bills</span>
           </button>
 
+          {/* TAB 3: QUICK PAY (SWAPPED TO EXACT CENTER WITH FLOATING CIRCLE) */}
+          <button 
+            onClick={() => setActiveTab('quickpay')}
+            className="flex flex-col items-center justify-center py-0 transition group"
+          >
+            <div className={`w-11 h-11 rounded-full flex items-center justify-center text-white shadow-xl -mt-5 border-2 border-slate-950 transition-transform active:scale-90 ${
+              activeTab === 'quickpay'
+                ? 'bg-gradient-to-tr from-rose-500 via-rose-600 to-indigo-600 shadow-rose-500/50 scale-105 ring-2 ring-rose-400/30'
+                : 'bg-gradient-to-r from-rose-600 to-indigo-600 shadow-rose-500/30'
+            }`}>
+              <Zap size={20} />
+            </div>
+            <span className={`text-[10px] mt-1 font-bold ${
+              activeTab === 'quickpay' ? 'text-rose-400' : 'text-slate-300'
+            }`}>Quick Pay</span>
+          </button>
+
+          {/* TAB 4: SHOPS (POSITION 4) */}
           <button 
             onClick={() => setActiveTab('shops')}
             className={`flex flex-col items-center justify-center py-1 transition ${
@@ -1407,6 +1658,7 @@ export default function App() {
             <span className="text-[10px] mt-1 font-semibold">Shops</span>
           </button>
 
+          {/* TAB 5: AUDIT (POSITION 5) */}
           <button 
             onClick={() => setActiveTab('audit')}
             className={`flex flex-col items-center justify-center py-1 transition ${
